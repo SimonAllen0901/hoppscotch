@@ -13,7 +13,7 @@ import { AuthEvent, AuthPlatformDef } from "@hoppscotch/common/platform/auth"
 import { PersistenceService } from "@hoppscotch/common/services/persistence"
 import { KernelInterceptorService } from "@hoppscotch/common/services/kernel-interceptor.service"
 
-import Login from "@platform-components/Login.vue"
+import Login from "@app/components/Login.vue"
 import { getAllowedAuthProviders, updateUserDisplayName } from "./api"
 
 export type HoppUserWithAuthDetail = {
@@ -62,19 +62,25 @@ async function logout() {
 
 async function signInUserWithGithubFB() {
   await Io.openExternalLink({
-    url: `${import.meta.env.VITE_BACKEND_API_URL}/auth/github?redirect_uri=desktop`,
+    url: `${
+      import.meta.env.VITE_BACKEND_API_URL
+    }/auth/github?redirect_uri=desktop`,
   })
 }
 
 async function signInUserWithGoogleFB() {
   await Io.openExternalLink({
-    url: `${import.meta.env.VITE_BACKEND_API_URL}/auth/google?redirect_uri=desktop`,
+    url: `${
+      import.meta.env.VITE_BACKEND_API_URL
+    }/auth/google?redirect_uri=desktop`,
   })
 }
 
 async function signInUserWithMicrosoftFB() {
   await Io.openExternalLink({
-    url: `${import.meta.env.VITE_BACKEND_API_URL}/auth/microsoft?redirect_uri=desktop`,
+    url: `${
+      import.meta.env.VITE_BACKEND_API_URL
+    }/auth/microsoft?redirect_uri=desktop`,
   })
 }
 
@@ -97,6 +103,7 @@ async function getInitialUserDetails(): Promise<
       version: "HTTP/1.1",
       headers: {
         Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
       },
       content: content.json({
         query: `query Me {
@@ -132,7 +139,7 @@ async function getInitialUserDetails(): Promise<
       }
     }
     return { error: "auth/cookies_not_found" }
-  } catch (error) {
+  } catch (_error) {
     return { error: "auth/cookies_not_found" }
   }
 }
@@ -215,7 +222,7 @@ async function refreshToken() {
   try {
     const refreshToken =
       await persistenceService.getLocalConfig("refresh_token")
-    if (!refreshToken) return null
+    if (!refreshToken) return false
 
     const { response } = interceptorService.execute({
       id: Date.now(),
@@ -247,7 +254,7 @@ async function refreshToken() {
     }
 
     return isSuccessful
-  } catch (err) {
+  } catch (_err) {
     return false
   }
 }
@@ -258,6 +265,9 @@ async function sendMagicLink(email: string) {
     url: `${import.meta.env.VITE_BACKEND_API_URL}/auth/signin?origin=desktop`,
     version: "HTTP/1.1",
     method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
     content: content.json({ email }),
   })
 
@@ -278,19 +288,16 @@ async function sendMagicLink(email: string) {
 
 async function setAuthCookies(headers: Headers) {
   const cookieHeader = headers.get("set-cookie")
-  const cookies = cookieHeader ? cookieHeader.split(",") : []
+  if (!cookieHeader) return
 
-  const accessTokenMatch = cookies.join(",").match(/access_token=([^;]+)/)
-  const refreshTokenMatch = cookies.join(",").match(/refresh_token=([^;]+)/)
+  const accessTMatch = cookieHeader.match(/access_token=([^;,\s]+)/)
+  const refreshTMatch = cookieHeader.match(/refresh_token=([^;,\s]+)/)
 
-  if (accessTokenMatch) {
-    const accessToken = accessTokenMatch[1]
-    await persistenceService.setLocalConfig("access_token", accessToken)
+  if (accessTMatch) {
+    await persistenceService.setLocalConfig("access_token", accessTMatch[1])
   }
-
-  if (refreshTokenMatch) {
-    const refreshToken = refreshTokenMatch[1]
-    await persistenceService.setLocalConfig("refresh_token", refreshToken)
+  if (refreshTMatch) {
+    await persistenceService.setLocalConfig("refresh_token", refreshTMatch[1])
   }
 }
 
@@ -460,6 +467,9 @@ export const def: AuthPlatformDef = {
       url: `${import.meta.env.VITE_BACKEND_API_URL}/auth/verify`,
       version: "HTTP/1.1",
       method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
       content: content.json({
         token: verifyToken,
         deviceIdentifier,
@@ -509,5 +519,40 @@ export const def: AuthPlatformDef = {
     authEvents$.next({
       event: "logout",
     })
+  },
+
+  async refreshAuthToken() {
+    const refreshed = await refreshToken()
+    return refreshed
+  },
+
+  /**
+   * Verifies if the current user's authentication tokens are valid
+   * @returns True if tokens are valid, false otherwise
+   */
+  async verifyAuthTokens() {
+    const BACKEND_API_URL = import.meta.env.VITE_BACKEND_API_URL
+
+    const { response } = interceptorService.execute({
+      id: Date.now(),
+      url: `${BACKEND_API_URL}/auth/verify-token`,
+      method: "GET",
+      version: "HTTP/1.1",
+      headers: {
+        "Content-Type": "application/json",
+        ...this.getBackendHeaders(),
+      },
+    })
+
+    const res = await response
+    if (E.isLeft(res)) return false
+
+    const parsed = parseBodyAsJSON<{ isValid: boolean }>(res.right.body)
+    if (parsed._tag === "Some" && parsed.value.isValid) {
+      return true
+    }
+
+    const refreshed = await refreshToken()
+    return refreshed
   },
 }

@@ -1,4 +1,4 @@
-import { authEvents$, def as platformAuth } from "@platform/auth/desktop"
+import { authEvents$, def as platformAuth } from "@app/platform/auth/desktop"
 import { entityReference } from "verzod"
 
 import {
@@ -15,11 +15,15 @@ import {
 import { EnvironmentsPlatformDef } from "@hoppscotch/common/src/platform/environments"
 import { runGQLSubscription } from "@hoppscotch/common/helpers/backend/GQLClient"
 
-import { environnmentsSyncer } from "@platform/environments/desktop/sync"
+import { environnmentsSyncer } from "@app/platform/environments/desktop/sync"
 
 import * as E from "fp-ts/Either"
-import { GlobalEnvironment } from "@hoppscotch/data"
-import { runDispatchWithOutSyncing } from "@lib/sync"
+import {
+  Environment,
+  EnvironmentSchemaVersion,
+  GlobalEnvironment,
+} from "@hoppscotch/data"
+import { runDispatchWithOutSyncing } from "@app/lib/sync"
 import {
   createUserGlobalEnvironment,
   getGlobalEnvironments,
@@ -82,13 +86,26 @@ async function loadUserEnvironments() {
 
     if (environments.length > 0) {
       runDispatchWithOutSyncing(() => {
+        const formatedEnvironments = environments.map(
+          (env) =>
+            <Environment>{
+              id: env.id,
+              name: env.name,
+              variables: JSON.parse(env.variables),
+            }
+        )
+
         replaceEnvironments(
-          environments.map(({ id, variables, name }) => ({
-            v: 1,
-            id,
-            name,
-            variables: JSON.parse(variables),
-          }))
+          formatedEnvironments.map((environment) => {
+            const parsedEnv = Environment.safeParse(environment)
+
+            return parsedEnv.type === "ok"
+              ? parsedEnv.value
+              : {
+                  ...environment,
+                  v: EnvironmentSchemaVersion,
+                }
+          })
         )
       })
     }
@@ -102,15 +119,21 @@ async function loadGlobalEnvironments() {
     const globalEnv = res.right.me.globalEnvironments
 
     if (globalEnv) {
-      const globalEnvVariableEntries = JSON.parse(globalEnv.variables)
+      const parsed = JSON.parse(globalEnv.variables)
 
-      const result = entityReference(GlobalEnvironment).safeParse(
-        globalEnvVariableEntries
-      )
+      // Parse ladder: wrapper → wrap-bare-array → empty wrapper.
+      let result = entityReference(GlobalEnvironment).safeParse(parsed)
+
+      if (!result.success && Array.isArray(parsed)) {
+        result = entityReference(GlobalEnvironment).safeParse({
+          v: 2,
+          variables: parsed,
+        })
+      }
 
       runDispatchWithOutSyncing(() => {
         setGlobalEnvVariables(
-          result.success ? result.data : globalEnvVariableEntries
+          result.success ? result.data : { v: 2, variables: [] }
         )
         setGlobalEnvID(globalEnv.id)
       })
@@ -164,7 +187,22 @@ function setupUserEnvironmentUpdatedSubscription() {
       // handle the case for global environments
       if (isGlobal) {
         runDispatchWithOutSyncing(() => {
-          setGlobalEnvVariables(JSON.parse(variables))
+          const parsed = JSON.parse(variables)
+
+          // Mirror the load path: try as-is first (so v0 bare arrays still
+          // migrate via verzod), only wrap a bare array as a v2 envelope
+          // when the as-is parse fails (the broken-intermediate-state case).
+          let result = entityReference(GlobalEnvironment).safeParse(parsed)
+          if (!result.success && Array.isArray(parsed)) {
+            result = entityReference(GlobalEnvironment).safeParse({
+              v: 2,
+              variables: parsed,
+            })
+          }
+
+          setGlobalEnvVariables(
+            result.success ? result.data : { v: 2, variables: [] }
+          )
         })
       } else {
         // handle the case for normal environments
@@ -176,7 +214,7 @@ function setupUserEnvironmentUpdatedSubscription() {
         if ((localIndex || localIndex == 0) && name) {
           runDispatchWithOutSyncing(() => {
             updateEnvironment(localIndex, {
-              v: 1,
+              v: 2,
               id,
               name,
               variables: JSON.parse(variables),

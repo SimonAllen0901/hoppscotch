@@ -1,8 +1,16 @@
 import { ref } from 'vue';
 import { InfraConfigEnum } from './backend/graphql';
 
+export type InputValidationStatus = {
+  proxyUrl: boolean;
+  smtpUrl: boolean;
+};
+
 // Check if any input validation has failed
-export const hasInputValidationFailed = ref(false);
+export const hasInputValidationFailed = ref<InputValidationStatus>({
+  proxyUrl: false,
+  smtpUrl: false,
+});
 
 export type SsoAuthProviders = 'google' | 'microsoft' | 'github';
 
@@ -53,8 +61,28 @@ export type ServerConfigs = {
       mailer_smtp_user: string;
       mailer_smtp_password: string;
       mailer_smtp_secure: boolean;
+      mailer_smtp_ignore_tls: boolean;
       mailer_tls_reject_unauthorized: boolean;
       mailer_use_custom_configs: boolean;
+      mailer_smtp_auth_type: string;
+      mailer_smtp_oauth2_user: string;
+      mailer_smtp_oauth2_client_id: string;
+      mailer_smtp_oauth2_client_secret: string;
+      mailer_smtp_oauth2_refresh_token: string;
+      mailer_smtp_oauth2_access_url: string;
+    };
+  };
+
+  tokenConfigs: {
+    name: string;
+    fields: {
+      jwt_secret: string;
+      token_salt_complexity: string;
+      magic_link_token_validity: string;
+      refresh_token_validity: string;
+      access_token_validity: string;
+      session_secret: string;
+      session_cookie_name: string;
     };
   };
 
@@ -66,6 +94,27 @@ export type ServerConfigs = {
   dataSharingConfigs: {
     name: string;
     enabled: boolean;
+  };
+
+  rateLimitConfigs: {
+    name: string;
+    fields: {
+      rate_limit_ttl: string;
+      rate_limit_max: string;
+    };
+  };
+  mockServerConfigs?: {
+    name: string;
+    fields: {
+      mock_server_wildcard_domain: string;
+    };
+  };
+
+  proxyUrlConfigs: {
+    name: string;
+    fields: {
+      proxy_app_url: string;
+    };
   };
 };
 
@@ -82,13 +131,15 @@ export type ConfigTransform = {
 
 export type ConfigSection = {
   name: SsoAuthProviders | string;
-  enabled: boolean;
+  enabled?: boolean;
   fields: Record<string, string | boolean>;
 };
 
 export type Config = {
   name: InfraConfigEnum;
   key: string;
+  // Marks fields that are optional and should be excluded from mandatory validation
+  optional?: boolean;
 };
 
 export const GOOGLE_CONFIGS: Config[] = [
@@ -193,8 +244,36 @@ export const CUSTOM_MAIL_CONFIGS: Config[] = [
     key: 'mailer_smtp_secure',
   },
   {
+    name: InfraConfigEnum.MailerSmtpIgnoreTls,
+    key: 'mailer_smtp_ignore_tls',
+  },
+  {
     name: InfraConfigEnum.MailerTlsRejectUnauthorized,
     key: 'mailer_tls_reject_unauthorized',
+  },
+  {
+    name: InfraConfigEnum.MailerSmtpAuthType,
+    key: 'mailer_smtp_auth_type',
+  },
+  {
+    name: InfraConfigEnum.MailerSmtpOauth2User,
+    key: 'mailer_smtp_oauth2_user',
+  },
+  {
+    name: InfraConfigEnum.MailerSmtpOauth2ClientId,
+    key: 'mailer_smtp_oauth2_client_id',
+  },
+  {
+    name: InfraConfigEnum.MailerSmtpOauth2ClientSecret,
+    key: 'mailer_smtp_oauth2_client_secret',
+  },
+  {
+    name: InfraConfigEnum.MailerSmtpOauth2RefreshToken,
+    key: 'mailer_smtp_oauth2_refresh_token',
+  },
+  {
+    name: InfraConfigEnum.MailerSmtpOauth2AccessUrl,
+    key: 'mailer_smtp_oauth2_access_url',
   },
 ];
 
@@ -211,6 +290,70 @@ export const HISTORY_STORE_CONFIG: Config[] = [
   },
 ];
 
+export const RATE_LIMIT_CONFIGS: Config[] = [
+  {
+    name: InfraConfigEnum.RateLimitTtl,
+    key: 'rate_limit_ttl',
+  },
+  {
+    name: InfraConfigEnum.RateLimitMax,
+    key: 'rate_limit_max',
+  },
+];
+
+export const TOKEN_VALIDATION_CONFIGS: Config[] = [
+  {
+    name: InfraConfigEnum.JwtSecret,
+    key: 'jwt_secret',
+  },
+  {
+    name: InfraConfigEnum.SessionSecret,
+    key: 'session_secret',
+  },
+  {
+    name: InfraConfigEnum.SessionCookieName,
+    key: 'session_cookie_name',
+    optional: true,
+  },
+  {
+    name: InfraConfigEnum.TokenSaltComplexity,
+    key: 'token_salt_complexity',
+  },
+  {
+    name: InfraConfigEnum.MagicLinkTokenValidity,
+    key: 'magic_link_token_validity',
+  },
+  {
+    name: InfraConfigEnum.RefreshTokenValidity,
+    key: 'refresh_token_validity',
+  },
+  {
+    name: InfraConfigEnum.AccessTokenValidity,
+    key: 'access_token_validity',
+  },
+];
+
+export const MOCK_SERVER_CONFIGS: Config[] = [
+  {
+    name: InfraConfigEnum.MockServerWildcardDomain,
+    key: 'mock_server_wildcard_domain',
+  },
+];
+
+export const PROXY_URL_CONFIGS: Config[] = [
+  {
+    name: InfraConfigEnum.ProxyAppUrl,
+    key: 'proxy_app_url',
+  },
+];
+
+// Mirrors the backend validateUrl regex (packages/hoppscotch-backend/src/utils.ts).
+// Keep these in sync — the backend rejects PROXY_APP_URL values that don't match.
+export const PROXY_URL_REGEX = /^(http|https):\/\/[^ "]+$/;
+
+export const isValidProxyUrl = (value: string): boolean =>
+  PROXY_URL_REGEX.test(value);
+
 export const ALL_CONFIGS = [
   GOOGLE_CONFIGS,
   MICROSOFT_CONFIGS,
@@ -219,4 +362,8 @@ export const ALL_CONFIGS = [
   CUSTOM_MAIL_CONFIGS,
   DATA_SHARING_CONFIGS,
   HISTORY_STORE_CONFIG,
+  RATE_LIMIT_CONFIGS,
+  TOKEN_VALIDATION_CONFIGS,
+  MOCK_SERVER_CONFIGS,
+  PROXY_URL_CONFIGS,
 ];

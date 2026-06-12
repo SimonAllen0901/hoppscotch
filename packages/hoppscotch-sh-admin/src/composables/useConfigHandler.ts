@@ -26,12 +26,21 @@ import {
   GOOGLE_CONFIGS,
   MAIL_CONFIGS,
   MICROSOFT_CONFIGS,
+  MOCK_SERVER_CONFIGS,
+  PROXY_URL_CONFIGS,
   ServerConfigs,
+  TOKEN_VALIDATION_CONFIGS,
   UpdatedConfigs,
 } from '~/helpers/configs';
 import { getCompiledErrorMessage } from '~/helpers/errors';
 import { useToast } from './toast';
 import { useClientHandler } from './useClientHandler';
+
+const COOKIE_NAME_REGEX = /^[A-Za-z0-9_-]+$/;
+
+const OPTIONAL_TOKEN_FIELD_KEYS = new Set(
+  TOKEN_VALIDATION_CONFIGS.filter((cfg) => cfg.optional).map((cfg) => cfg.key)
+);
 
 /** Composable that handles all operations related to server configurations
  * @param updatedConfigs A Config Object containing the updated configs
@@ -129,11 +138,50 @@ export function useConfigHandler(updatedConfigs?: ServerConfigs) {
           ),
           mailer_smtp_secure:
             getFieldValue(InfraConfigEnum.MailerSmtpSecure) === 'true',
+          mailer_smtp_ignore_tls:
+            getFieldValue(InfraConfigEnum.MailerSmtpIgnoreTls) === 'true',
           mailer_tls_reject_unauthorized:
             getFieldValue(InfraConfigEnum.MailerTlsRejectUnauthorized) ===
             'true',
           mailer_use_custom_configs:
             getFieldValue(InfraConfigEnum.MailerUseCustomConfigs) === 'true',
+          mailer_smtp_auth_type:
+            getFieldValue(InfraConfigEnum.MailerSmtpAuthType) || 'login',
+          mailer_smtp_oauth2_user: getFieldValue(
+            InfraConfigEnum.MailerSmtpOauth2User
+          ),
+          mailer_smtp_oauth2_client_id: getFieldValue(
+            InfraConfigEnum.MailerSmtpOauth2ClientId
+          ),
+          mailer_smtp_oauth2_client_secret: getFieldValue(
+            InfraConfigEnum.MailerSmtpOauth2ClientSecret
+          ),
+          mailer_smtp_oauth2_refresh_token: getFieldValue(
+            InfraConfigEnum.MailerSmtpOauth2RefreshToken
+          ),
+          mailer_smtp_oauth2_access_url: getFieldValue(
+            InfraConfigEnum.MailerSmtpOauth2AccessUrl
+          ),
+        },
+      },
+      tokenConfigs: {
+        name: 'token',
+        fields: {
+          jwt_secret: getFieldValue(InfraConfigEnum.JwtSecret),
+          token_salt_complexity: getFieldValue(
+            InfraConfigEnum.TokenSaltComplexity
+          ),
+          magic_link_token_validity: getFieldValue(
+            InfraConfigEnum.MagicLinkTokenValidity
+          ),
+          refresh_token_validity: getFieldValue(
+            InfraConfigEnum.RefreshTokenValidity
+          ),
+          access_token_validity: getFieldValue(
+            InfraConfigEnum.AccessTokenValidity
+          ),
+          session_secret: getFieldValue(InfraConfigEnum.SessionSecret),
+          session_cookie_name: getFieldValue(InfraConfigEnum.SessionCookieName),
         },
       },
       dataSharingConfigs: {
@@ -150,6 +198,27 @@ export function useConfigHandler(updatedConfigs?: ServerConfigs) {
             config.value === 'ENABLE'
         ),
       },
+      rateLimitConfigs: {
+        name: 'rate_limit',
+        fields: {
+          rate_limit_ttl: getFieldValue(InfraConfigEnum.RateLimitTtl),
+          rate_limit_max: getFieldValue(InfraConfigEnum.RateLimitMax),
+        },
+      },
+      mockServerConfigs: {
+        name: 'mock_server',
+        fields: {
+          mock_server_wildcard_domain: getFieldValue(
+            InfraConfigEnum.MockServerWildcardDomain
+          ),
+        },
+      },
+      proxyUrlConfigs: {
+        name: 'proxy_app_url',
+        fields: {
+          proxy_app_url: getFieldValue(InfraConfigEnum.ProxyAppUrl),
+        },
+      },
     };
 
     // Cloning the current configs to working configs
@@ -165,10 +234,55 @@ export function useConfigHandler(updatedConfigs?: ServerConfigs) {
     Check if any of the config fields are empty
   */
   const isFieldEmpty = (field: string | boolean) => {
-    if (typeof field === 'boolean') {
+    if (typeof field === 'boolean' || typeof field === 'number') {
       return false;
     }
     return field.trim() === '';
+  };
+
+  /**
+   * This is used to validate number fields, ensuring they are not NaN or less than or equal to zero.
+   * It checks if the field is a number or a numeric string, and returns true if it is not valid.
+   * @param field Field value to validate
+   * @returns Boolean indicating if the field is not valid
+   */
+  const isNotValidNumber = (field: string | boolean | number) => {
+    if (typeof field === 'boolean') {
+      return false;
+    }
+
+    // Accept numbers or numeric strings (e.g., "1000"), but not non-numeric strings (e.g., "abc")
+    if (typeof field === 'number') {
+      return isNaN(field);
+    }
+
+    if (typeof field === 'string') {
+      // Trim and check if the string is a valid number
+      const trimmed = field.trim();
+      if (trimmed === '') return true;
+      return isNaN(Number(trimmed));
+    }
+
+    return true;
+  };
+
+  /**
+   * Check if the field is not valid
+   * This is used to validate number fields, ensuring they are not NaN or less than or equal to zero.
+   * @param field Field value to validate
+   * @returns Boolean indicating if the field is valid
+   */
+  const isFieldNotValid = (field: string | boolean) => {
+    if (typeof field === 'boolean') {
+      return false;
+    }
+
+    const num = Number(field);
+    if (isNaN(num) && typeof field === 'string') {
+      return field.trim() === '';
+    }
+
+    return num <= 0;
   };
 
   const AreAnyConfigFieldsEmpty = (config: ServerConfigs): boolean => {
@@ -177,25 +291,62 @@ export function useConfigHandler(updatedConfigs?: ServerConfigs) {
       config.providers.google,
       config.providers.microsoft,
       config.mailConfigs,
+      config.rateLimitConfigs,
+      config.tokenConfigs,
+      config.proxyUrlConfigs,
     ];
 
     const hasSectionWithEmptyFields = sections.some((section) => {
-      if (
-        section.name === 'email' &&
-        !section.fields.mailer_use_custom_configs
-      ) {
+      if (section.name === 'email') {
+        const { mailer_use_custom_configs, ...otherFields } = section.fields;
+
+        // SMTP user and password are optional as a pair (both or neither)
+        const optionalMailerKeys = ['mailer_smtp_user', 'mailer_smtp_password'];
+        // OAuth2 fields are always optional and auth_type has a default
+        const oauth2Keys = [
+          'mailer_smtp_auth_type',
+          'mailer_smtp_oauth2_user',
+          'mailer_smtp_oauth2_client_id',
+          'mailer_smtp_oauth2_client_secret',
+          'mailer_smtp_oauth2_refresh_token',
+          'mailer_smtp_oauth2_access_url',
+        ];
+        const excludeKeys = mailer_use_custom_configs
+          ? ['mailer_smtp_url', ...optionalMailerKeys, ...oauth2Keys]
+          : [
+              'mailer_smtp_host',
+              'mailer_smtp_port',
+              'mailer_smtp_user',
+              'mailer_smtp_password',
+              ...oauth2Keys,
+            ];
+
         return (
           section.enabled &&
-          Object.entries(section.fields).some(
+          Object.entries(otherFields).some(
             ([key, value]) =>
-              isFieldEmpty(value) &&
-              key !== 'mailer_smtp_host' &&
-              key !== 'mailer_smtp_port' &&
-              key !== 'mailer_smtp_user' &&
-              key !== 'mailer_smtp_password'
+              isFieldEmpty(value) && !excludeKeys.includes(key)
           )
         );
       }
+
+      // This section has no enabled property, so we check fields directly
+      // for a valid number (>0) or non-empty string
+      if (section.name === 'token') {
+        return Object.entries(section.fields).some(
+          ([key, value]) =>
+            !OPTIONAL_TOKEN_FIELD_KEYS.has(key) && isFieldNotValid(value)
+        );
+      }
+
+      // For rate limit section, we want to check if the values are not valid numbers
+      // and not empty strings
+      if (section.name === 'rate_limit')
+        return Object.values(section.fields).some(isNotValidNumber);
+
+      // Proxy URL section has no enabled toggle; ensure it isn't left empty
+      if (section.name === 'proxy_app_url')
+        return Object.values(section.fields).some(isFieldEmpty);
 
       return (
         section.enabled && Object.values(section.fields).some(isFieldEmpty)
@@ -203,6 +354,22 @@ export function useConfigHandler(updatedConfigs?: ServerConfigs) {
     });
 
     return hasSectionWithEmptyFields;
+  };
+
+  const hasPartialSmtpCredentials = (config: ServerConfigs): boolean => {
+    if (!config.mailConfigs.enabled) return false;
+
+    const fields = config.mailConfigs.fields;
+    if (!fields.mailer_use_custom_configs) return false;
+
+    // Enforced regardless of auth_type: the backend validates the pair
+    // on every save, so stale login values left behind after switching
+    // to the OAuth2 tab would still be rejected. Surface this in the FE
+    // toast so users know to clear those fields before saving.
+    const hasUser = fields.mailer_smtp_user.trim() !== '';
+    const hasPass = fields.mailer_smtp_password.trim() !== '';
+
+    return hasUser !== hasPass;
   };
 
   // Extract the mail config fields (excluding the custom mail config fields)
@@ -257,6 +424,16 @@ export function useConfigHandler(updatedConfigs?: ServerConfigs) {
         enabled: isCustomMailConfigEnabled,
         fields: customMailConfigFields,
       },
+      {
+        config: MOCK_SERVER_CONFIGS,
+        enabled: true,
+        fields: updatedConfigs?.mockServerConfigs?.fields ?? {},
+      },
+      {
+        config: PROXY_URL_CONFIGS,
+        enabled: true,
+        fields: updatedConfigs?.proxyUrlConfigs?.fields,
+      },
     ];
 
     const transformedConfigs: UpdatedConfigs[] = [];
@@ -269,6 +446,10 @@ export function useConfigHandler(updatedConfigs?: ServerConfigs) {
         else if (enabled && fields) {
           const value =
             typeof fields === 'string' ? fields : String(fields[key]);
+          // BE rejects empty PROXY_APP_URL and would fail the whole batch.
+          // The form-level guard already blocks the save, but skip here too
+          // so a stray empty value can't blackhole unrelated settings.
+          if (name === InfraConfigEnum.ProxyAppUrl && !value.trim()) return;
           transformedConfigs.push({ name, value });
         }
       });
@@ -407,6 +588,130 @@ export function useConfigHandler(updatedConfigs?: ServerConfigs) {
       'configs.user_history_store.toggle_failure'
     );
 
+  const updateRateLimitConfigs = (
+    updateRateLimitMutation: UseMutationResponse<UpdateInfraConfigsMutation>
+  ) => {
+    if (!updatedConfigs?.rateLimitConfigs) {
+      toast.error(t('configs.rate_limit.input_validation_error'));
+      return false;
+    }
+
+    const rateLimitTtl = String(
+      updatedConfigs?.rateLimitConfigs.fields.rate_limit_ttl
+    );
+    const rateLimitMax = String(
+      updatedConfigs?.rateLimitConfigs.fields.rate_limit_max
+    );
+
+    if (isFieldEmpty(rateLimitTtl) || isFieldEmpty(rateLimitMax)) {
+      toast.error(t('configs.rate_limit.input_validation_error'));
+      return false;
+    }
+
+    const rateLimitConfigs: InfraConfigArgs[] = [
+      {
+        name: InfraConfigEnum.RateLimitTtl,
+        value: String(rateLimitTtl),
+      },
+      {
+        name: InfraConfigEnum.RateLimitMax,
+        value: String(rateLimitMax),
+      },
+    ];
+
+    return executeMutation(
+      updateRateLimitMutation,
+      {
+        infraConfigs: rateLimitConfigs,
+      },
+      'configs.rate_limit.update_failure'
+    );
+  };
+
+  const updateAuthTokenConfigs = (
+    updateAuthTokenMutation: UseMutationResponse<UpdateInfraConfigsMutation>
+  ) => {
+    if (!updatedConfigs?.tokenConfigs) {
+      toast.error(t('configs.auth_providers.token.update_failure'));
+      return false;
+    }
+
+    const jwtSecret = String(updatedConfigs?.tokenConfigs.fields.jwt_secret);
+    const tokenSaltComplexity = String(
+      updatedConfigs?.tokenConfigs.fields.token_salt_complexity
+    );
+    const magicLinkTokenValidity = String(
+      updatedConfigs?.tokenConfigs.fields.magic_link_token_validity
+    );
+    const refreshTokenValidity = String(
+      updatedConfigs?.tokenConfigs.fields.refresh_token_validity
+    );
+    const accessTokenValidity = String(
+      updatedConfigs?.tokenConfigs.fields.access_token_validity
+    );
+    const sessionSecret = String(
+      updatedConfigs?.tokenConfigs.fields.session_secret
+    );
+    const sessionCookieName = String(
+      updatedConfigs?.tokenConfigs.fields.session_cookie_name || ''
+    );
+    // Validate cookie name: allow empty (falls back to default), else enforce pattern
+    if (sessionCookieName && !COOKIE_NAME_REGEX.test(sessionCookieName)) {
+      toast.error(t('configs.auth_providers.token.session_cookie_name_invalid'));
+      return false;
+    }
+    if (
+      isFieldEmpty(jwtSecret) ||
+      isFieldEmpty(tokenSaltComplexity) ||
+      isFieldEmpty(magicLinkTokenValidity) ||
+      isFieldEmpty(refreshTokenValidity) ||
+      isFieldEmpty(accessTokenValidity) ||
+      isFieldEmpty(sessionSecret)
+    ) {
+      toast.error(t('configs.auth_providers.token.update_failure'));
+      return false;
+    }
+
+    const authTokenConfigs: InfraConfigArgs[] = [
+      {
+        name: InfraConfigEnum.JwtSecret,
+        value: jwtSecret,
+      },
+      {
+        name: InfraConfigEnum.TokenSaltComplexity,
+        value: tokenSaltComplexity,
+      },
+      {
+        name: InfraConfigEnum.MagicLinkTokenValidity,
+        value: magicLinkTokenValidity,
+      },
+      {
+        name: InfraConfigEnum.RefreshTokenValidity,
+        value: refreshTokenValidity,
+      },
+      {
+        name: InfraConfigEnum.AccessTokenValidity,
+        value: accessTokenValidity,
+      },
+      {
+        name: InfraConfigEnum.SessionSecret,
+        value: sessionSecret,
+      },
+      {
+        name: InfraConfigEnum.SessionCookieName,
+        value: sessionCookieName,
+      },
+    ];
+
+    return executeMutation(
+      updateAuthTokenMutation,
+      {
+        infraConfigs: authTokenConfigs,
+      },
+      'configs.auth_providers.token.update_failure'
+    );
+  };
+
   return {
     currentConfigs,
     workingConfigs,
@@ -414,6 +719,8 @@ export function useConfigHandler(updatedConfigs?: ServerConfigs) {
     updateDataSharingConfigs,
     toggleSMTPConfigs,
     toggleUserHistoryStore,
+    updateRateLimitConfigs,
+    updateAuthTokenConfigs,
     updateInfraConfigs,
     resetInfraConfigs,
     fetchingInfraConfigs,
@@ -421,5 +728,6 @@ export function useConfigHandler(updatedConfigs?: ServerConfigs) {
     infraConfigsError,
     allowedAuthProvidersError,
     AreAnyConfigFieldsEmpty,
+    hasPartialSmtpCredentials,
   };
 }

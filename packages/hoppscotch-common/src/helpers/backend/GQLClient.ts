@@ -21,8 +21,9 @@ import * as E from "fp-ts/Either"
 import * as TE from "fp-ts/TaskEither"
 import { pipe, constVoid, flow } from "fp-ts/function"
 import { subscribe, pipe as wonkaPipe } from "wonka"
-import { filter, map, Subject } from "rxjs"
+import { filter, map, Subject, Subscription } from "rxjs"
 import { platform } from "~/platform"
+import { createAuthRetryGuard } from "~/helpers/retryAuthGuard"
 
 // TODO: Implement caching
 
@@ -65,6 +66,8 @@ const createSubscriptionClient = () => {
   })
 }
 
+const authRetryGuard = createAuthRetryGuard(() => platform.auth.signOutUser())
+
 const createHoppClient = () => {
   const exchanges = [
     // devtoolsExchange,
@@ -96,11 +99,20 @@ const createHoppClient = () => {
         willAuthError() {
           return platform.auth.willBackendHaveAuthError()
         },
-        didAuthError() {
-          return false
+        didAuthError(error) {
+          // Check for specific error patterns that indicate expired token
+          return error.graphQLErrors.some(
+            (e) =>
+              e.message.includes("auth/fail") ||
+              e.message.includes("jwt expired") ||
+              e.extensions?.code === "UNAUTHENTICATED"
+          )
         },
         async refreshAuth() {
-          // TODO
+          const refresh = platform.auth.refreshAuthToken
+          if (!refresh) return
+
+          await authRetryGuard.execute(() => refresh.call(platform.auth))
         },
       }
     }),
@@ -132,14 +144,27 @@ const createHoppClient = () => {
     ...(platform.auth.getGQLClientOptions
       ? platform.auth.getGQLClientOptions()
       : {}),
+    preferGetMethod: false,
   })
 }
 
 let subscriptionClient: SubscriptionClient | null
+let authEventSubscription: Subscription | null = null
 export const client = ref<Client>()
 
 export function initBackendGQLClient() {
   client.value = createHoppClient()
+
+  // Reset the retry guard only on successful login, not on every
+  // client recreation (which also fires on logout/token_refresh).
+  authEventSubscription?.unsubscribe()
+  authEventSubscription = platform.auth
+    .getAuthEventsStream()
+    .subscribe((event) => {
+      if (event.event === "login") {
+        authRetryGuard.reset()
+      }
+    })
 
   platform.auth.onBackendGQLClientShouldReconnect(() => {
     const currentUser = platform.auth.getCurrentUser()

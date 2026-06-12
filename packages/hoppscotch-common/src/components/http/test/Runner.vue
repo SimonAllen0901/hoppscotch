@@ -128,7 +128,6 @@ import { useService } from "dioc/vue"
 import { pipe } from "fp-ts/lib/function"
 import * as TE from "fp-ts/TaskEither"
 import { computed, nextTick, onMounted, ref } from "vue"
-import { useReadonlyStream } from "~/composables/stream"
 import { useColorMode } from "~/composables/theming"
 import { useToast } from "~/composables/toast"
 import { GQLError } from "~/helpers/backend/GQLClient"
@@ -142,7 +141,7 @@ import {
   TestRunnerCollectionsAdapter,
 } from "~/helpers/runner/adapter"
 import { getErrorMessage } from "~/helpers/runner/collection-tree"
-import TeamCollectionAdapter from "~/helpers/teams/TeamCollectionAdapter"
+import { transformInheritedCollectionVariablesToAggregateEnv } from "~/helpers/utils/inheritedCollectionVarTransformer"
 import {
   getRESTCollectionByRefId,
   getRESTCollectionInheritedProps,
@@ -150,6 +149,7 @@ import {
 } from "~/newstore/collections"
 import { HoppTab } from "~/services/tab"
 import { RESTTabService } from "~/services/tab/rest"
+import { TeamCollectionsService } from "~/services/team-collection.service"
 import {
   TestRunnerRequest,
   TestRunnerService,
@@ -160,11 +160,8 @@ const t = useI18n()
 const toast = useToast()
 const colorMode = useColorMode()
 
-const teamCollectionAdapter = new TeamCollectionAdapter(null)
-const teamCollectionList = useReadonlyStream(
-  teamCollectionAdapter.collections$,
-  []
-)
+const teamCollectionService = useService(TeamCollectionsService)
+const teamCollectionList = teamCollectionService.collections
 
 const props = defineProps<{ modelValue: HoppTab<HoppTestRunnerDocument> }>()
 
@@ -252,6 +249,11 @@ const runTests = async () => {
   )
 
   let resolvedCollection: HoppCollection = collection.value
+  // Scripts declared on ancestors above the selected run-start node — must be
+  // seeded into the runner so partial-scope runs still honor the documented
+  // Root → Parent → Child → Request inheritance chain.
+  let ancestorPreRequestScripts: string[] = []
+  let ancestorTestScripts: string[] = []
 
   if (!isPersonalWorkspace) {
     const requestAuth = tab.value.document.inheritedProperties?.auth
@@ -269,29 +271,66 @@ const runTests = async () => {
       }
     )
 
+    const parentVariables = transformInheritedCollectionVariablesToAggregateEnv(
+      tab.value.document.inheritedProperties?.variables ?? []
+    )
+
+    // Team cascade includes the selected node itself in its scripts array;
+    // drop it here because runTestCollection will cascade that node's scripts
+    // as part of the normal tree walk, and we must not double-run them.
+    const inheritedScripts = (
+      tab.value.document.inheritedProperties?.scripts ?? []
+    ).filter((s) => s.parentID !== collectionID)
+    ancestorPreRequestScripts = inheritedScripts
+      .map((s) => s.preRequestScript)
+      .filter((s) => s && s.trim().length > 0)
+    ancestorTestScripts = inheritedScripts
+      .map((s) => s.testScript)
+      .filter((s) => s && s.trim().length > 0)
+
     resolvedCollection = {
       ...collection.value,
       auth: requestAuth,
       headers: requestHeaders as HoppRESTHeader[],
+      variables: parentVariables,
     }
   } else {
-    const { auth, headers } = collectionInheritedProps ?? {
+    const {
+      auth,
+      headers,
+      variables,
+      ancestorPreRequestScripts: preAncestors,
+      ancestorTestScripts: testAncestors,
+    } = collectionInheritedProps ?? {
       auth: { authActive: true, authType: "none" },
       headers: [],
+      variables: [],
+      ancestorPreRequestScripts: [],
+      ancestorTestScripts: [],
     }
+
+    ancestorPreRequestScripts = preAncestors
+    ancestorTestScripts = testAncestors
 
     resolvedCollection = {
       ...collection.value,
       auth,
       headers,
+      variables,
     }
   }
 
   testRunnerStopRef.value = false // when testRunnerStopRef is false, the test runner will start running
-  testRunnerService.runTests(tab, resolvedCollection, {
-    ...testRunnerConfig.value,
-    stopRef: testRunnerStopRef,
-  })
+  testRunnerService.runTests(
+    tab,
+    resolvedCollection,
+    {
+      ...testRunnerConfig.value,
+      stopRef: testRunnerStopRef,
+    },
+    ancestorPreRequestScripts,
+    ancestorTestScripts
+  )
 }
 
 const stopTests = () => {

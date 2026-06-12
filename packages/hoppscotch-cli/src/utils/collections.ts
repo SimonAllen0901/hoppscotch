@@ -34,6 +34,7 @@ import {
   processRequest,
 } from "./request";
 import { getTestMetrics } from "./test";
+import { filterValidScripts } from "@hoppscotch/js-sandbox/scripting";
 
 const { WARN, FAIL, INFO } = exceptionColors;
 
@@ -47,7 +48,14 @@ const { WARN, FAIL, INFO } = exceptionColors;
 export const collectionsRunner = async (
   param: CollectionRunnerParam
 ): Promise<RequestReport[]> => {
-  const { collections, envs, delay, iterationCount, iterationData } = param;
+  const {
+    collections,
+    envs,
+    delay,
+    iterationCount,
+    iterationData,
+    legacySandbox,
+  } = param;
 
   const resolvedDelay = delay ?? 0;
 
@@ -87,7 +95,8 @@ export const collectionsRunner = async (
         path,
         envs,
         resolvedDelay,
-        requestsReport
+        requestsReport,
+        legacySandbox
       );
     }
   }
@@ -100,17 +109,40 @@ const processCollection = async (
   path: string,
   envs: HoppEnvs,
   delay: number,
-  requestsReport: RequestReport[]
+  requestsReport: RequestReport[],
+  legacySandbox?: boolean,
+  ancestorPreRequestScripts: string[] = [],
+  ancestorTestScripts: string[] = []
 ) => {
+  // Accumulate scripts from root -> current collection for inheritance
+  // filterValidScripts strips empty, whitespace-only, and module-prefix-only scripts
+  const inheritedPreRequestScripts = filterValidScripts([
+    ...ancestorPreRequestScripts,
+    collection.preRequestScript,
+  ]);
+  const inheritedTestScripts = filterValidScripts([
+    ...ancestorTestScripts,
+    collection.testScript,
+  ]);
+
   // Process each request in the collection
   for (const request of collection.requests) {
     const _request = preProcessRequest(request as HoppRESTRequest, collection);
     const requestPath = `${path}/${_request.name}`;
+
+    const collectionVariables = collection.variables.filter(
+      (variable) => variable.key && variable.key.trim() !== ""
+    );
+
     const processRequestParams: ProcessRequestParams = {
       path: requestPath,
       request: _request,
       envs,
       delay,
+      legacySandbox,
+      collectionVariables,
+      inheritedPreRequestScripts,
+      inheritedTestScripts,
     };
 
     // Request processing initiated message.
@@ -133,11 +165,11 @@ const processCollection = async (
   for (const folder of collection.folders) {
     const updatedFolder: HoppCollection = { ...folder };
 
-    if (updatedFolder.auth?.authType === "inherit") {
+    if (updatedFolder.auth.authType === "inherit") {
       updatedFolder.auth = collection.auth;
     }
 
-    if (collection.headers?.length) {
+    if (collection.headers.length) {
       // Filter out header entries present in the parent collection under the same name
       // This ensures the folder headers take precedence over the collection headers
       const filteredHeaders = collection.headers.filter(
@@ -151,12 +183,30 @@ const processCollection = async (
       updatedFolder.headers.push(...filteredHeaders);
     }
 
+    // Inherit collection variables into folder, with folder variables taking precedence
+    if (collection.variables.length) {
+      // Filter out collection variables with same key as folder variables
+      const filteredVariables = collection.variables.filter(
+        (collectionVariableEntries) => {
+          return !updatedFolder.variables.some(
+            (folderVariableEntries) =>
+              folderVariableEntries.key === collectionVariableEntries.key
+          );
+        }
+      );
+
+      updatedFolder.variables.push(...filteredVariables);
+    }
+
     await processCollection(
       updatedFolder,
       `${path}/${updatedFolder.name}`,
       envs,
       delay,
-      requestsReport
+      requestsReport,
+      legacySandbox,
+      inheritedPreRequestScripts,
+      inheritedTestScripts
     );
   }
 };

@@ -1,12 +1,14 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { InfraConfig } from './infra-config.model';
 import { PrismaService } from 'src/prisma/prisma.service';
-import { InfraConfig as DBInfraConfig } from '@prisma/client';
+import { InfraConfig as DBInfraConfig } from 'src/generated/prisma/client';
 import * as E from 'fp-ts/Either';
 import { InfraConfigEnum } from 'src/types/InfraConfig';
+import { SMTPAuthType } from 'src/mailer/helper';
 import {
   AUTH_PROVIDER_NOT_SPECIFIED,
   DATABASE_TABLE_NOT_EXIST,
+  INFRA_CONFIG_FETCH_FAILED,
   INFRA_CONFIG_INVALID_INPUT,
   INFRA_CONFIG_NOT_FOUND,
   INFRA_CONFIG_RESET_FAILED,
@@ -25,6 +27,8 @@ import {
 import { ConfigService } from '@nestjs/config';
 import {
   ServiceStatus,
+  buildDerivedEnv,
+  disconnectSharedPrismaInstance,
   getDefaultInfraConfigs,
   getEncryptionRequiredInfraConfigEntries,
   getMissingInfraConfigEntries,
@@ -34,13 +38,23 @@ import {
 import { EnableAndDisableSSOArgs, InfraConfigArgs } from './input-args';
 import { AuthProvider } from 'src/auth/helper';
 import { PubSubService } from 'src/pubsub/pubsub.service';
+import { UserService } from 'src/user/user.service';
+import {
+  GetOnboardingConfigResponse,
+  GetOnboardingStatusResponse,
+  SaveOnboardingConfigRequest,
+  SaveOnboardingConfigResponse,
+} from './dto/onboarding.dto';
+import * as crypto from 'crypto';
+import { PrismaError } from 'src/prisma/prisma-error-codes';
 
 @Injectable()
-export class InfraConfigService implements OnModuleInit {
+export class InfraConfigService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly prisma: PrismaService,
     private readonly configService: ConfigService,
     private readonly pubsub: PubSubService,
+    private readonly userService: UserService,
   ) {}
 
   // Following fields are not updatable by `infraConfigs` Mutation. Use dedicated mutations for these fields instead.
@@ -61,6 +75,9 @@ export class InfraConfigService implements OnModuleInit {
 
   async onModuleInit() {
     await this.initializeInfraConfigTable();
+  }
+  async onModuleDestroy() {
+    await disconnectSharedPrismaInstance();
   }
 
   /**
@@ -94,6 +111,19 @@ export class InfraConfigService implements OnModuleInit {
         await Promise.allSettled(dbOperations);
       }
 
+      // Derive env variables programmatically if they don't exist or need to be updated
+      const derivedEnv = await buildDerivedEnv();
+
+      if (Object.keys(derivedEnv).length > 0) {
+        const dbOperations = Object.entries(derivedEnv).map(([name, value]) => {
+          return this.prisma.infraConfig.update({
+            where: { name: name as InfraConfigEnum },
+            data: { value },
+          });
+        });
+        await Promise.allSettled(dbOperations);
+      }
+
       // Sync the InfraConfigs with the .env file, if .env file updates later on
       const envFileChangesRequired = await syncInfraConfigWithEnvFile();
       if (envFileChangesRequired.length > 0) {
@@ -107,23 +137,29 @@ export class InfraConfigService implements OnModuleInit {
         await Promise.allSettled(dbOperations);
       }
 
-      // Restart the app if needed
+      // Restart the app if needed. Metadata-only sync writes (where `value`
+      // is undefined because only `lastSyncedEnvFileValue` is being persisted)
+      // don't change runtime config, so they shouldn't trigger a restart.
+      const envValueChanged = envFileChangesRequired.some(
+        (c) => c.value !== undefined,
+      );
       if (
         propsToInsert.length > 0 ||
         encryptionRequiredEntries.length > 0 ||
-        envFileChangesRequired.length > 0
+        Object.keys(derivedEnv).length > 0 ||
+        envValueChanged
       ) {
         stopApp();
       }
     } catch (error) {
-      if (error.code === 'P1001') {
+      if (error.code === PrismaError.DATABASE_UNREACHABLE) {
         // Prisma error code for 'Can't reach at database server'
         // We're not throwing error here because we want to allow the app to run 'pnpm install'
-      } else if (error.code === 'P2021') {
+      } else if (error.code === PrismaError.TABLE_DOES_NOT_EXIST) {
         // Prisma error code for 'Table does not exist'
         throwErr(DATABASE_TABLE_NOT_EXIST);
       } else {
-        console.log(error);
+        console.error(error);
         throwErr(error);
       }
     }
@@ -134,7 +170,7 @@ export class InfraConfigService implements OnModuleInit {
    * @param dbInfraConfig database InfraConfig
    * @returns InfraConfig model
    */
-  cast(dbInfraConfig: DBInfraConfig) {
+  private cast(dbInfraConfig: DBInfraConfig) {
     switch (dbInfraConfig.name) {
       case InfraConfigEnum.USER_HISTORY_STORE_ENABLED:
         dbInfraConfig.value =
@@ -210,14 +246,24 @@ export class InfraConfigService implements OnModuleInit {
    * @param infraConfigs InfraConfigs to update
    * @returns InfraConfig model
    */
-  async updateMany(infraConfigs: InfraConfigArgs[]) {
-    for (let i = 0; i < infraConfigs.length; i++) {
-      if (this.EXCLUDE_FROM_UPDATE_CONFIGS.includes(infraConfigs[i].name))
-        return E.left(INFRA_CONFIG_OPERATION_NOT_ALLOWED);
+  async updateMany(
+    infraConfigs: InfraConfigArgs[],
+    checkDisallowedKeys: boolean = true,
+  ) {
+    if (checkDisallowedKeys) {
+      // Check if the names are allowed to update by client
+      for (let i = 0; i < infraConfigs.length; i++) {
+        if (this.EXCLUDE_FROM_UPDATE_CONFIGS.includes(infraConfigs[i].name))
+          return E.left(INFRA_CONFIG_OPERATION_NOT_ALLOWED);
+      }
     }
 
     const isValidate = this.validateEnvValues(infraConfigs);
     if (E.isLeft(isValidate)) return E.left(isValidate.left);
+
+    // Validate SMTP credentials pair against effective post-update state
+    const smtpPairCheck = await this.validateSmtpCredentialPair(infraConfigs);
+    if (E.isLeft(smtpPairCheck)) return E.left(smtpPairCheck.left);
 
     try {
       const dbInfraConfig = await this.prisma.infraConfig.findMany({
@@ -289,8 +335,6 @@ export class InfraConfigService implements OnModuleInit {
             configMap.MAILER_SMTP_HOST &&
             configMap.MAILER_SMTP_PORT &&
             configMap.MAILER_SMTP_SECURE &&
-            configMap.MAILER_SMTP_USER &&
-            configMap.MAILER_SMTP_PASSWORD &&
             configMap.MAILER_TLS_REJECT_UNAUTHORIZED &&
             configMap.MAILER_ADDRESS_FROM
           );
@@ -374,7 +418,7 @@ export class InfraConfigService implements OnModuleInit {
     const infra = await this.get(InfraConfigEnum.VITE_ALLOWED_AUTH_PROVIDERS);
     if (E.isLeft(infra)) return E.left(infra.left);
 
-    const allowedAuthProviders = infra.right.value.split(',');
+    const allowedAuthProviders = infra.right.value?.split(',') ?? [];
     let updatedAuthProviders = allowedAuthProviders;
 
     const infraConfigMap = await this.getInfraConfigsMap();
@@ -457,9 +501,11 @@ export class InfraConfigService implements OnModuleInit {
    * @returns string[]
    */
   getAllowedAuthProviders() {
-    return this.configService
-      .get<string>('INFRA.VITE_ALLOWED_AUTH_PROVIDERS')
-      .split(',');
+    return (
+      this.configService
+        .get<string>('INFRA.VITE_ALLOWED_AUTH_PROVIDERS')
+        ?.split(',') ?? []
+    );
   }
 
   /**
@@ -486,6 +532,121 @@ export class InfraConfigService implements OnModuleInit {
   }
 
   /**
+   * Get onboarding status
+   * @returns GetOnboardingStatusResponse
+   */
+  async getOnboardingStatus() {
+    try {
+      const configMap = await this.getInfraConfigsMap();
+      const usersCount = await this.userService.getUsersCount();
+
+      return E.right({
+        onboardingCompleted: configMap.ONBOARDING_COMPLETED === 'true',
+        canReRunOnboarding: usersCount === 0,
+      } as GetOnboardingStatusResponse);
+    } catch {
+      return E.left(INFRA_CONFIG_FETCH_FAILED);
+    }
+  }
+
+  /**
+   * Update the onboarding configuration
+   * @param dto SaveOnboardingConfigRequest
+   */
+  async updateOnboardingConfig(dto: SaveOnboardingConfigRequest) {
+    const onboardingRecoveryToken = crypto.randomUUID();
+
+    const configEntries: InfraConfigArgs[] = [
+      ...Object.entries(dto)
+        .filter(
+          ([key, value]) =>
+            value !== undefined &&
+            Object.keys(new SaveOnboardingConfigRequest()).includes(key),
+        )
+        .map(([key, value]) => ({
+          name: key as InfraConfigEnum,
+          value,
+        })),
+      {
+        name: InfraConfigEnum.ONBOARDING_COMPLETED,
+        value: 'true',
+      },
+      {
+        name: InfraConfigEnum.ONBOARDING_RECOVERY_TOKEN,
+        value: onboardingRecoveryToken,
+      },
+    ];
+
+    const isValidated = this.validateEnvValues(configEntries);
+    if (E.isLeft(isValidated)) return E.left(isValidated.left);
+
+    // Verify MAILER_SMTP_ENABLE
+    if (
+      dto[InfraConfigEnum.MAILER_SMTP_ENABLE] === 'true' &&
+      !this.isServiceConfigured(
+        AuthProvider.EMAIL,
+        dto as unknown as Record<string, string>,
+      )
+    ) {
+      return E.left(INFRA_CONFIG_SERVICE_NOT_CONFIGURED);
+    }
+
+    // Verify VITE_ALLOWED_AUTH_PROVIDERS
+    const allowedAuthProviders =
+      dto[InfraConfigEnum.VITE_ALLOWED_AUTH_PROVIDERS].split(',');
+
+    if (allowedAuthProviders.length === 0) {
+      return E.left(AUTH_PROVIDER_NOT_SPECIFIED);
+    }
+    for (const provider of allowedAuthProviders) {
+      if (
+        !Object.values(AuthProvider).includes(provider as AuthProvider) ||
+        !this.isServiceConfigured(
+          provider as AuthProvider,
+          dto as unknown as Record<string, string>,
+        )
+      ) {
+        return E.left(INFRA_CONFIG_SERVICE_NOT_CONFIGURED);
+      }
+    }
+
+    // Move forward with updating the InfraConfigs
+    const isUpdated = await this.updateMany(configEntries, false);
+    if (E.isLeft(isUpdated)) return E.left(isUpdated.left);
+
+    return E.right({
+      token: onboardingRecoveryToken,
+    } as SaveOnboardingConfigResponse);
+  }
+
+  /**
+   * Get onboarding configuration
+   * @param token Onboarding recovery token
+   * @returns GetOnboardingConfigResponse
+   */
+  async getOnboardingConfig(token: string) {
+    const configs = await this.getMany(Object.values(InfraConfigEnum), false);
+    if (E.isLeft(configs)) return E.left(configs.left);
+
+    // Check if the onboarding recovery token is valid
+    const recoveryToken = configs.right.find(
+      (config) => config.name === InfraConfigEnum.ONBOARDING_RECOVERY_TOKEN,
+    )?.value;
+
+    const tokenIsValid =
+      typeof token === 'string' &&
+      token.trim().length > 0 &&
+      token === recoveryToken;
+
+    const onboardingConfig = configs.right.reduce((acc, config) => {
+      acc[config.name] = tokenIsValid ? config.value : null;
+      return acc;
+    }, {} as GetOnboardingConfigResponse);
+
+    return E.right(onboardingConfig);
+  }
+
+  /**
    * Reset all the InfraConfigs to their default values (from .env)
    */
   async reset() {
@@ -496,21 +657,26 @@ export class InfraConfigService implements OnModuleInit {
       InfraConfigEnum.ALLOW_ANALYTICS_COLLECTION,
     ];
     try {
-      const infraConfigDefaultObjs = await getDefaultInfraConfigs();
-      const updatedInfraConfigDefaultObjs = infraConfigDefaultObjs.filter(
+      const defaultConfigs = await getDefaultInfraConfigs();
+
+      const configsToReset = defaultConfigs.filter(
         (p) => RESET_EXCLUSION_LIST.includes(p.name) === false,
       );
 
+      // Update ONBOARDING_COMPLETED value to false
+      const onboardingCompletedIndex = configsToReset.findIndex(
+        (p) => p.name === InfraConfigEnum.ONBOARDING_COMPLETED,
+      );
+      if (onboardingCompletedIndex !== -1) {
+        configsToReset[onboardingCompletedIndex].value = 'false';
+      }
+
       await this.prisma.infraConfig.deleteMany({
-        where: {
-          name: {
-            in: updatedInfraConfigDefaultObjs.map((p) => p.name),
-          },
-        },
+        where: { name: { in: configsToReset.map((p) => p.name) } },
       });
 
       await this.prisma.infraConfig.createMany({
-        data: updatedInfraConfigDefaultObjs,
+        data: configsToReset,
       });
 
       stopApp();
@@ -522,6 +688,58 @@ export class InfraConfigService implements OnModuleInit {
   }
 
   /**
+   * Validate that SMTP user and password are both provided or both empty,
+   * checking the effective post-update state (incoming merged with DB).
+   */
+  private async validateSmtpCredentialPair(
+    infraConfigs: { name: InfraConfigEnum; value: string }[],
+  ) {
+    const incoming = new Map(infraConfigs.map((c) => [c.name, c.value]));
+    const smtpKeys = [
+      InfraConfigEnum.MAILER_SMTP_USER,
+      InfraConfigEnum.MAILER_SMTP_PASSWORD,
+    ];
+
+    if (!smtpKeys.some((key) => incoming.has(key))) {
+      return E.right(true);
+    }
+
+    const missingKeys = smtpKeys.filter((key) => !incoming.has(key));
+
+    const dbRows =
+      missingKeys.length === 0
+        ? []
+        : await this.prisma.infraConfig.findMany({
+            where: { name: { in: missingKeys } },
+            select: { name: true, value: true, isEncrypted: true },
+          });
+
+    const dbValues = new Map(
+      dbRows.map((row) => [
+        row.name,
+        row.value ? (row.isEncrypted ? decrypt(row.value) : row.value) : '',
+      ]),
+    );
+
+    const smtpUser =
+      incoming.get(InfraConfigEnum.MAILER_SMTP_USER) ??
+      dbValues.get(InfraConfigEnum.MAILER_SMTP_USER) ??
+      '';
+
+    const smtpPass =
+      incoming.get(InfraConfigEnum.MAILER_SMTP_PASSWORD) ??
+      dbValues.get(InfraConfigEnum.MAILER_SMTP_PASSWORD) ??
+      '';
+
+    const hasUser = smtpUser.trim() !== '';
+    const hasPass = smtpPass.trim() !== '';
+
+    return hasUser !== hasPass
+      ? E.left(INFRA_CONFIG_INVALID_INPUT)
+      : E.right(true);
+  }
+
+  /**
    * Validate the values of the InfraConfigs
    */
   validateEnvValues(
@@ -530,98 +748,103 @@ export class InfraConfigService implements OnModuleInit {
       value: string;
     }[],
   ) {
-    for (let i = 0; i < infraConfigs.length; i++) {
-      switch (infraConfigs[i].name) {
+    for (const config of infraConfigs) {
+      const { name, value } = config;
+
+      const fail = () => {
+        console.error(`[Infra Validation Failed] Key: ${name}`);
+        return E.left(INFRA_CONFIG_INVALID_INPUT);
+      };
+
+      switch (name) {
         case InfraConfigEnum.MAILER_SMTP_ENABLE:
-          if (
-            infraConfigs[i].value !== 'true' &&
-            infraConfigs[i].value !== 'false'
-          )
-            return E.left(INFRA_CONFIG_INVALID_INPUT);
-          break;
         case InfraConfigEnum.MAILER_USE_CUSTOM_CONFIGS:
-          if (
-            infraConfigs[i].value !== 'true' &&
-            infraConfigs[i].value !== 'false'
-          )
-            return E.left(INFRA_CONFIG_INVALID_INPUT);
-          break;
-        case InfraConfigEnum.MAILER_SMTP_URL:
-          const isValidUrl = validateSMTPUrl(infraConfigs[i].value);
-          if (!isValidUrl) return E.left(INFRA_CONFIG_INVALID_INPUT);
-          break;
-        case InfraConfigEnum.MAILER_ADDRESS_FROM:
-          const isValidEmail = validateSMTPEmail(infraConfigs[i].value);
-          if (!isValidEmail) return E.left(INFRA_CONFIG_INVALID_INPUT);
-          break;
-        case InfraConfigEnum.MAILER_SMTP_HOST:
-          if (!infraConfigs[i].value) return E.left(INFRA_CONFIG_INVALID_INPUT);
-          break;
-        case InfraConfigEnum.MAILER_SMTP_PORT:
-          if (!infraConfigs[i].value) return E.left(INFRA_CONFIG_INVALID_INPUT);
-          break;
         case InfraConfigEnum.MAILER_SMTP_SECURE:
-          if (
-            infraConfigs[i].value !== 'true' &&
-            infraConfigs[i].value !== 'false'
-          )
-            return E.left(INFRA_CONFIG_INVALID_INPUT);
-          break;
-        case InfraConfigEnum.MAILER_SMTP_USER:
-          if (!infraConfigs[i].value) return E.left(INFRA_CONFIG_INVALID_INPUT);
-          break;
-        case InfraConfigEnum.MAILER_SMTP_PASSWORD:
-          if (!infraConfigs[i].value) return E.left(INFRA_CONFIG_INVALID_INPUT);
-          break;
         case InfraConfigEnum.MAILER_TLS_REJECT_UNAUTHORIZED:
+        case InfraConfigEnum.MAILER_SMTP_IGNORE_TLS:
+          if (value !== 'true' && value !== 'false') return fail();
+          break;
+
+        case InfraConfigEnum.MAILER_SMTP_AUTH_TYPE:
           if (
-            infraConfigs[i].value !== 'true' &&
-            infraConfigs[i].value !== 'false'
+            value &&
+            !Object.values(SMTPAuthType).includes(value as SMTPAuthType)
           )
-            return E.left(INFRA_CONFIG_INVALID_INPUT);
+            return fail();
           break;
+
+        case InfraConfigEnum.MAILER_SMTP_OAUTH2_ACCESS_URL:
+          if (value && !validateUrl(value)) return fail();
+          break;
+
+        case InfraConfigEnum.MAILER_SMTP_URL:
+          if (!validateSMTPUrl(value)) return fail();
+          break;
+
+        case InfraConfigEnum.MAILER_ADDRESS_FROM:
+          if (!validateSMTPEmail(value)) return fail();
+          break;
+
+        case InfraConfigEnum.MOCK_SERVER_WILDCARD_DOMAIN:
+          if (!value) break; // Allow empty value
+
+          if (!value.startsWith('*.mock.')) return fail();
+          // Validate domain format after *.mock.
+          const domainPart = value.substring(7); // Remove '*.mock.'
+          const domainRegex =
+            /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+          if (!domainPart || !domainRegex.test(domainPart)) return fail();
+          break;
+
+        case InfraConfigEnum.MAILER_SMTP_HOST:
+        case InfraConfigEnum.MAILER_SMTP_PORT:
         case InfraConfigEnum.GOOGLE_CLIENT_ID:
-          if (!infraConfigs[i].value) return E.left(INFRA_CONFIG_INVALID_INPUT);
-          break;
         case InfraConfigEnum.GOOGLE_CLIENT_SECRET:
-          if (!infraConfigs[i].value) return E.left(INFRA_CONFIG_INVALID_INPUT);
-          break;
-        case InfraConfigEnum.GOOGLE_CALLBACK_URL:
-          if (!validateUrl(infraConfigs[i].value))
-            return E.left(INFRA_CONFIG_INVALID_INPUT);
-          break;
         case InfraConfigEnum.GOOGLE_SCOPE:
-          if (!infraConfigs[i].value) return E.left(INFRA_CONFIG_INVALID_INPUT);
-          break;
         case InfraConfigEnum.GITHUB_CLIENT_ID:
-          if (!infraConfigs[i].value) return E.left(INFRA_CONFIG_INVALID_INPUT);
-          break;
         case InfraConfigEnum.GITHUB_CLIENT_SECRET:
-          if (!infraConfigs[i].value) return E.left(INFRA_CONFIG_INVALID_INPUT);
-          break;
-        case InfraConfigEnum.GITHUB_CALLBACK_URL:
-          if (!validateUrl(infraConfigs[i].value))
-            return E.left(INFRA_CONFIG_INVALID_INPUT);
-          break;
         case InfraConfigEnum.GITHUB_SCOPE:
-          if (!infraConfigs[i].value) return E.left(INFRA_CONFIG_INVALID_INPUT);
-          break;
         case InfraConfigEnum.MICROSOFT_CLIENT_ID:
-          if (!infraConfigs[i].value) return E.left(INFRA_CONFIG_INVALID_INPUT);
-          break;
         case InfraConfigEnum.MICROSOFT_CLIENT_SECRET:
-          if (!infraConfigs[i].value) return E.left(INFRA_CONFIG_INVALID_INPUT);
-          break;
-        case InfraConfigEnum.MICROSOFT_CALLBACK_URL:
-          if (!validateUrl(infraConfigs[i].value))
-            return E.left(INFRA_CONFIG_INVALID_INPUT);
-          break;
         case InfraConfigEnum.MICROSOFT_SCOPE:
-          if (!infraConfigs[i].value) return E.left(INFRA_CONFIG_INVALID_INPUT);
-          break;
         case InfraConfigEnum.MICROSOFT_TENANT:
-          if (!infraConfigs[i].value) return E.left(INFRA_CONFIG_INVALID_INPUT);
+          if (!value) return fail();
           break;
+
+        case InfraConfigEnum.GOOGLE_CALLBACK_URL:
+        case InfraConfigEnum.GITHUB_CALLBACK_URL:
+        case InfraConfigEnum.MICROSOFT_CALLBACK_URL:
+        case InfraConfigEnum.PROXY_APP_URL:
+          if (!validateUrl(value)) return fail();
+          break;
+
+        case InfraConfigEnum.VITE_ALLOWED_AUTH_PROVIDERS:
+          const allowedAuthProviders = value.split(',');
+          if (
+            allowedAuthProviders.length === 0 ||
+            allowedAuthProviders.some(
+              (p) => !Object.values(AuthProvider).includes(p as AuthProvider),
+            )
+          ) {
+            return fail();
+          }
+          break;
+
+        case InfraConfigEnum.TOKEN_SALT_COMPLEXITY:
+        case InfraConfigEnum.MAGIC_LINK_TOKEN_VALIDITY:
+        case InfraConfigEnum.ACCESS_TOKEN_VALIDITY:
+        case InfraConfigEnum.REFRESH_TOKEN_VALIDITY:
+        case InfraConfigEnum.RATE_LIMIT_TTL:
+        case InfraConfigEnum.RATE_LIMIT_MAX:
+          if (!Number.isInteger(Number(value)) || Number(value) < 1)
+            return fail();
+          break;
+
+        case InfraConfigEnum.SESSION_COOKIE_NAME:
+          // Allow empty to fall back to default; otherwise enforce allowed characters
+          if (value && !/^[A-Za-z0-9_-]+$/.test(value)) return fail();
+          break;
+
         default:
           break;
       }

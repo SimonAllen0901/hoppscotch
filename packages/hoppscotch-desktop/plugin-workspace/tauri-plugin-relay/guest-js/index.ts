@@ -82,7 +82,7 @@ export type FormDataValue =
     | { kind: "text"; value: string }
     | { kind: "file"; filename: string; contentType: string; data: Uint8Array }
 
-export type FormData = Map<string, FormDataValue[]>
+export type FormData = [string, FormDataValue[]][]
 
 export enum MediaType {
     TEXT_PLAIN = "text/plain",
@@ -187,6 +187,19 @@ export type CertificateType =
     password: string
   }
 
+export interface RequestOptions {
+  timeout?: number
+  followRedirects?: boolean
+  maxRedirects?: number
+  decompress?: boolean
+  cookies?: boolean
+  keepAlive?: boolean
+}
+
+export interface RequestMeta {
+  options?: RequestOptions
+}
+
 export interface Request {
   id: number
   url: string
@@ -213,6 +226,8 @@ export interface Request {
       password: string
     }
   }
+
+  meta?: RequestMeta
 }
 
 export interface Response {

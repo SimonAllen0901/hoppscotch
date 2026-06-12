@@ -40,6 +40,7 @@ const samples = [
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -151,6 +152,7 @@ const samples = [
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -170,6 +172,7 @@ const samples = [
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -196,6 +199,7 @@ const samples = [
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -228,6 +232,7 @@ const samples = [
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -260,6 +265,7 @@ const samples = [
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -292,6 +298,7 @@ const samples = [
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -312,11 +319,19 @@ const samples = [
         body: null,
       },
       params: [],
-      headers: [],
+      headers: [
+        {
+          active: true,
+          key: "Authorization",
+          value: "Basic dXNlcjpwYXNz",
+          description: "",
+        },
+      ],
       preRequestScript: "",
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -335,11 +350,19 @@ const samples = [
         body: null,
       },
       params: [],
-      headers: [],
+      headers: [
+        {
+          active: true,
+          key: "Authorization",
+          value: "Basic 77898dXNlcjpwYXNz",
+          description: "",
+        },
+      ],
       preRequestScript: "",
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -360,11 +383,20 @@ const samples = [
         body: null,
       },
       params: [],
-      headers: [],
+      headers: [
+        {
+          active: true,
+          key: "Authorization",
+          value:
+            "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+          description: "",
+        },
+      ],
       preRequestScript: "",
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -400,6 +432,7 @@ const samples = [
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -471,6 +504,7 @@ const samples = [
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -501,6 +535,7 @@ const samples = [
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -566,6 +601,7 @@ const samples = [
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -615,6 +651,7 @@ const samples = [
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -666,6 +703,7 @@ const samples = [
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -682,6 +720,7 @@ const samples = [
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -708,6 +747,7 @@ const samples = [
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -727,6 +767,7 @@ const samples = [
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -753,6 +794,7 @@ const samples = [
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -772,6 +814,7 @@ const samples = [
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -798,6 +841,7 @@ const samples = [
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -822,6 +866,7 @@ const samples = [
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -844,6 +889,7 @@ const samples = [
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -867,6 +913,7 @@ const samples = [
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -889,6 +936,7 @@ const samples = [
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -922,6 +970,7 @@ const samples = [
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -956,6 +1005,7 @@ data2: {"type":"test2","typeId":"123"}`,
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
   {
@@ -982,6 +1032,12 @@ data2: {"type":"test2","typeId":"123"}`,
       headers: [
         {
           active: true,
+          key: "Authorization",
+          value: "Basic YXNkZmdoOjEyMzQ=",
+          description: "",
+        },
+        {
+          active: true,
           key: "User-Agent",
           value:
             "Mozilla/5.0 (X11; Linux x86_64; rv:78.0) Gecko/20100101 Firefox/78.0",
@@ -998,6 +1054,7 @@ data2: {"type":"test2","typeId":"123"}`,
       testScript: "",
       requestVariables: [],
       responses: {},
+      description: null,
     }),
   },
 ]
@@ -1005,7 +1062,27 @@ data2: {"type":"test2","typeId":"123"}`,
 describe("Parse curl command to Hopp REST Request", () => {
   for (const [i, { command, response }] of samples.entries()) {
     test(`for sample #${i + 1}:\n\n${command}`, () => {
-      expect(parseCurlToHoppRESTReq(command)).toEqual(response)
+      const actual = parseCurlToHoppRESTReq(command)
+
+      /**
+       * An object possibly carrying an internal reference id.
+       * @typedef {object} RefIdCarrier
+       * @property {unknown} [_ref_id]
+       */
+
+      /**
+       * @template {object} T
+       * @param {T & RefIdCarrier} obj
+       * @returns {Omit<T, "_ref_id">}
+       */
+      const stripRefId = (obj) => {
+        const clone = { ...obj }
+        delete clone._ref_id
+        return clone
+      }
+
+      // Strip off _ref_id added by makeRESTRequest for equality check because it is generated randomly
+      expect(stripRefId(actual)).toEqual(stripRefId(response))
     })
   }
 })

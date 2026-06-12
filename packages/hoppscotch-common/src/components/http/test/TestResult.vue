@@ -156,9 +156,9 @@
     <HoppSmartPlaceholder
       v-else-if="testResults && testResults.scriptError"
       :src="`/images/states/${colorMode.value}/youre_lost.svg`"
-      :alt="`${t('error.test_script_fail')}`"
-      :heading="t('error.test_script_fail')"
-      :text="t('helpers.test_script_fail')"
+      :alt="`${t('error.post_request_script_fail')}`"
+      :heading="t('error.post_request_script_fail')"
+      :text="t('helpers.post_request_script_fail')"
     >
     </HoppSmartPlaceholder>
     <template v-else>
@@ -276,7 +276,10 @@ const selectedEnvironmentIndex = useStream(
   setSelectedEnvironmentIndex
 )
 
-const globalEnvVars = useReadonlyStream(globalEnv$, {} as GlobalEnvironment)
+const globalEnvVars = useReadonlyStream(globalEnv$, {
+  v: 2,
+  variables: [],
+} as GlobalEnvironment)
 
 const noEnvSelected = computed(
   () => selectedEnvironmentIndex.value.type === "NO_ENV_SELECTED"

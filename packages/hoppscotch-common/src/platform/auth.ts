@@ -38,11 +38,19 @@ export type AuthEvent =
   | { event: "probable_login"; user: HoppUser } // We have previous login state, but the app is waiting for authentication
   | { event: "login"; user: HoppUser } // We are authenticated
   | { event: "logout" } // No authentication and we have no previous state
+  | { event: "token_refresh"; user: HoppUser } // We have refreshed our tokens and have new ones now
 
 export type GithubSignInResult =
   | { type: "success"; user: HoppUser } // The authentication was a success
   | { type: "account-exists-with-different-cred"; link: () => Promise<void> } // We authenticated correctly, but the provider didn't match, so we give the user the opportunity to link to continue completing auth
   | { type: "error"; err: unknown } // Auth failed completely and we don't know why
+
+export type SetEmailAddressResult =
+  | { type: "success" } // The email address was set successfully
+  | { type: "email-already-in-use" } // The email address is already in use by another account
+  | { type: "requires-recent-login"; link: () => Promise<void> } // The user needs to re-authenticate to set the email address
+  | { type: "no-user-logged-in" } // No user is currently logged in, so we can't set the email address
+  | { type: "error"; err: unknown } // An error occurred while setting the email address
 
 export type LoginItemDef = {
   id: string
@@ -230,10 +238,18 @@ export type AuthPlatformDef = {
 
   /**
    * Updates the email address of the user
+   *
+   * NOTES:
+   * 1. This will return an error if the email is already in use by another account
+   * 2. This will return an error if the user needs to re-authenticate
+   * 3. This will return undefined if no user is logged in, so check for that before calling this
+   *
    * @param email The new email to set this to.
-   * @returns An empty promise that is resolved when the operation is complete
+   * @returns A promise that resolves with the email update status when the operation is complete
    */
-  setEmailAddress: (email: string) => Promise<void>
+  setEmailAddress: (
+    email: string
+  ) => Promise<SetEmailAddressResult> | Promise<void>
 
   /**
    * Updates the display name of the user
@@ -253,4 +269,23 @@ export type AuthPlatformDef = {
    * Defines the additional login items that should be shown in the login screen
    */
   additionalLoginItems?: LoginItemDef[]
+
+  /**
+   * Whether the email address is editable by the user or not.
+   * This is used to determine whether the email address field should disabled in the user settings.
+   * If a value is not given, then the value is assumed to be false.
+   */
+  isEmailEditable?: boolean
+
+  /** Verifies if the current user's authentication tokens are valid
+   * For self-hosted, this should verify the tokens with the backend
+   * @returns True if tokens are valid, false otherwise
+   */
+  verifyAuthTokens?: () => Promise<boolean>
+
+  /** Refreshes the authentication tokens for the current user
+   * For self-hosted, this should refresh the tokens with the backend
+   * @returns True if tokens were refreshed successfully, false otherwise
+   */
+  refreshAuthToken?: () => Promise<boolean>
 }

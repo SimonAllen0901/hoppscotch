@@ -1,15 +1,19 @@
 import { Service } from "dioc"
 import { markRaw } from "vue"
-import { body, relayRequestToNativeAdapter } from "@hoppscotch/kernel"
-import * as E from "fp-ts/Either"
-import { pipe } from "fp-ts/function"
-import axios, { CancelTokenSource } from "axios"
-import { preProcessRelayRequest } from "~/helpers/functional/preprocess"
 import {
+  body,
+  relayRequestToNativeAdapter,
   RelayRequest,
   RelayResponse,
   RelayCapabilities,
 } from "@hoppscotch/kernel"
+import * as E from "fp-ts/Either"
+import { pipe } from "fp-ts/function"
+import axios, { CancelTokenSource } from "axios"
+import {
+  postProcessRelayRequest,
+  preProcessRelayRequest,
+} from "~/helpers/functional/process-request"
 import type { getI18n } from "~/modules/i18n"
 import {
   KernelInterceptor,
@@ -19,7 +23,7 @@ import {
 import { KernelInterceptorAgentStore } from "./store"
 import SettingsAgent from "~/components/settings/Agent.vue"
 import SettingsAgentSubtitle from "~/components/settings/AgentSubtitle.vue"
-import InterceptorsErrorPlaceholder from "~/components/interceptors/ErrorPlaceholder.vue"
+import InterceptorsErrorPlaceholder from "~/components/settings/InterceptorErrorPlaceholder.vue"
 import { CookieJarService } from "~/services/cookie-jar.service"
 
 export class AgentKernelInterceptorService
@@ -62,7 +66,7 @@ export class AgentKernelInterceptorService
       "urlencoded",
       "compression",
     ]),
-    auth: new Set(["basic", "bearer", "apikey", "digest", "aws"]),
+    auth: new Set(["basic", "bearer", "apikey", "digest", "aws", "hawk"]),
     security: new Set([
       "clientcertificates",
       "cacertificates",
@@ -132,8 +136,29 @@ export class AgentKernelInterceptorService
           .join(";")
       }
 
+      const existingUserAgentHeader = Object.keys(
+        effectiveRequest.headers || {}
+      ).find((header) => header.toLowerCase() === "user-agent")
+
+      // A temporary workaround to add a User-Agent header to the request
+      // This will be removed once the agent is updated to add User-Agent header by default
+      const effectiveRequestWithUserAgent = {
+        ...effectiveRequest,
+        headers: {
+          ...effectiveRequest.headers,
+          "User-Agent": existingUserAgentHeader
+            ? effectiveRequest.headers[existingUserAgentHeader]
+            : "HoppscotchKernel/0.2.0",
+        },
+      }
+
+      const nativeRequest = await relayRequestToNativeAdapter(
+        effectiveRequestWithUserAgent
+      )
+      const postProcessedRequest = postProcessRelayRequest(nativeRequest)
+
       const [nonceB16, encryptedReq] = await this.store.encryptRequest(
-        await relayRequestToNativeAdapter(effectiveRequest),
+        postProcessedRequest,
         reqID
       )
 
@@ -161,9 +186,30 @@ export class AgentKernelInterceptorService
         decryptedResponse.body.body,
         decryptedResponse.body.mediaType
       )
+
+      // Process Set-Cookie headers for multiHeaders support
+      const multiHeaders: Array<{ key: string; value: string }> = []
+      if (decryptedResponse.headers) {
+        for (const [key, value] of Object.entries(decryptedResponse.headers)) {
+          if (key.toLowerCase() === "set-cookie") {
+            // Split concatenated Set-Cookie headers
+            const cookieStrings = value
+              .split("\n")
+              .map((s) => s.trim())
+              .filter(Boolean)
+            for (const cookieString of cookieStrings) {
+              multiHeaders.push({ key: "Set-Cookie", value: cookieString })
+            }
+          } else {
+            multiHeaders.push({ key, value })
+          }
+        }
+      }
+
       const transformedResponse = {
         ...decryptedResponse,
         body: { ...transformedBody },
+        multiHeaders: multiHeaders.length > 0 ? multiHeaders : undefined,
       }
 
       return E.right(transformedResponse)

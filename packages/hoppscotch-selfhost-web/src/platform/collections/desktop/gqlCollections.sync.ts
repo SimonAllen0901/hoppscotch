@@ -8,12 +8,18 @@ import {
   settingsStore,
 } from "@hoppscotch/common/newstore/settings"
 
-import { HoppCollection, HoppRESTRequest } from "@hoppscotch/data"
+import {
+  generateUniqueRefId,
+  HoppCollection,
+  HoppRESTRequest,
+} from "@hoppscotch/data"
 
-import { getSyncInitFunction } from "@lib/sync"
+import { stripSecretVariableValuesForWire } from "@hoppscotch/common/helpers/secretVariables"
 
-import { StoreSyncDefinitionOf } from "@lib/sync"
-import { createMapper } from "@lib/sync/mapper"
+import { getSyncInitFunction, type StoreSyncDefinitionOf } from "@app/lib/sync"
+
+import { createMapper } from "@app/lib/sync/mapper"
+
 import {
   createGQLChildUserCollection,
   createGQLRootUserCollection,
@@ -22,21 +28,45 @@ import {
   deleteUserRequest,
   duplicateUserCollection,
   editGQLUserRequest,
+  importUserCollectionsFromJSON,
   updateUserCollection,
 } from "./api"
 
 import * as E from "fp-ts/Either"
-import { ReqType } from "@api/generated/graphql"
+import { ReqType } from "@app/api/generated/graphql"
 import { moveOrReorderRequests } from "./sync"
 
 // gqlCollectionsMapper uses the collectionPath as the local identifier
+// Helper function to transform HoppCollection to backend format
+const transformCollectionForBackend = (collection: HoppCollection): any => {
+  const data = {
+    auth: collection.auth ?? {
+      authType: "inherit",
+      authActive: true,
+    },
+    headers: collection.headers ?? [],
+    variables: stripSecretVariableValuesForWire(collection.variables ?? []),
+    _ref_id: collection._ref_id,
+    description: collection.description ?? null,
+    preRequestScript: collection.preRequestScript ?? "",
+    testScript: collection.testScript ?? "",
+  }
+
+  return {
+    name: collection.name,
+    data: JSON.stringify(data),
+    folders: collection.folders.map(transformCollectionForBackend),
+    requests: collection.requests,
+  }
+}
+
 export const gqlCollectionsMapper = createMapper<string, string>()
 
 // gqlRequestsMapper uses the collectionPath/requestIndex as the local identifier
 export const gqlRequestsMapper = createMapper<string, string>()
 
-// temp implementation until the backend implements an endpoint that accepts an entire collection
-// TODO: use importCollectionsJSON to do this
+// Optimized implementation using importUserCollectionsFromJSON for bulk operations
+// This replaces individual createGQLRootUserCollection/createGQLChildUserCollection/createGQLUserRequest calls
 const recursivelySyncCollections = async (
   collection: HoppCollection,
   collectionPath: string,
@@ -52,6 +82,11 @@ const recursivelySyncCollections = async (
         authActive: true,
       },
       headers: collection.headers ?? [],
+      variables: stripSecretVariableValuesForWire(collection.variables ?? []),
+      _ref_id: collection._ref_id,
+      description: collection.description ?? null,
+      preRequestScript: collection.preRequestScript ?? "",
+      testScript: collection.testScript ?? "",
     }
     const res = await createGQLRootUserCollection(
       collection.name,
@@ -69,11 +104,21 @@ const recursivelySyncCollections = async (
               authActive: true,
             },
             headers: [],
+            variables: [],
+            _ref_id: collection._ref_id ?? generateUniqueRefId("coll"),
+            description: null,
+            preRequestScript: "",
+            testScript: "",
           }
 
       collection.id = parentCollectionID
       collection.auth = returnedData.auth
       collection.headers = returnedData.headers
+      collection.variables = returnedData.variables
+      collection._ref_id = returnedData._ref_id ?? generateUniqueRefId("coll")
+      collection.description = returnedData.description ?? null
+      collection.preRequestScript = returnedData.preRequestScript ?? ""
+      collection.testScript = returnedData.testScript ?? ""
 
       removeDuplicateGraphqlCollectionOrFolder(
         parentCollectionID,
@@ -91,6 +136,11 @@ const recursivelySyncCollections = async (
         authActive: true,
       },
       headers: collection.headers ?? [],
+      variables: stripSecretVariableValuesForWire(collection.variables ?? []),
+      _ref_id: collection._ref_id,
+      description: collection.description ?? null,
+      preRequestScript: collection.preRequestScript ?? "",
+      testScript: collection.testScript ?? "",
     }
 
     const res = await createGQLChildUserCollection(
@@ -110,12 +160,22 @@ const recursivelySyncCollections = async (
               authActive: true,
             },
             headers: [],
+            variables: [],
+            _ref_id: collection._ref_id ?? generateUniqueRefId("coll"),
+            description: null,
+            preRequestScript: "",
+            testScript: "",
           }
 
       collection.id = childCollectionId
       collection.auth = returnedData.auth
       collection.headers = returnedData.headers
       parentCollectionID = childCollectionId
+      collection.variables = returnedData.variables
+      collection._ref_id = returnedData._ref_id ?? generateUniqueRefId("coll")
+      collection.description = returnedData.description ?? null
+      collection.preRequestScript = returnedData.preRequestScript ?? ""
+      collection.testScript = returnedData.testScript ?? ""
 
       removeDuplicateGraphqlCollectionOrFolder(
         childCollectionId,
@@ -127,13 +187,11 @@ const recursivelySyncCollections = async (
   // create the requests
   if (parentCollectionID) {
     collection.requests.forEach(async (request) => {
-      const res =
-        parentCollectionID &&
-        (await createGQLUserRequest(
-          request.name,
-          JSON.stringify(request),
-          parentCollectionID
-        ))
+      const res = await createGQLUserRequest(
+        request.name,
+        JSON.stringify(request),
+        parentCollectionID
+      )
 
       if (res && E.isRight(res)) {
         const requestId = res.right.createGQLUserRequest.id
@@ -178,15 +236,37 @@ export const gqlCollectionsOperations: Array<OperationCollectionRemoved> = []
 export const storeSyncDefinition: StoreSyncDefinitionOf<
   typeof graphqlCollectionStore
 > = {
-  appendCollections({ entries }) {
-    let indexStart = graphqlCollectionStore.value.state.length - entries.length
+  async appendCollections({ entries }) {
+    if (entries.length === 0) return
 
-    entries.forEach((collection) => {
-      recursivelySyncCollections(collection, `${indexStart}`)
-      indexStart++
-    })
+    // Transform collections to backend format
+    const transformedCollections = entries.map(transformCollectionForBackend)
+
+    // Use the bulk import API instead of individual calls
+    const jsonString = JSON.stringify(transformedCollections)
+
+    const result = await importUserCollectionsFromJSON(
+      jsonString,
+      ReqType.Gql,
+      undefined // undefined for root collections
+    )
+
+    // The backend handles creating all collections and requests in a single transaction
+    // The frontend collections will be updated through subscriptions
+
+    if (E.isLeft(result)) {
+      // Fallback to individual calls if bulk import fails
+      let indexStart =
+        graphqlCollectionStore.value.state.length - entries.length
+
+      entries.forEach((collection) => {
+        recursivelySyncCollections(collection, `${indexStart}`)
+        indexStart++
+      })
+    }
   },
   async addCollection({ collection }) {
+    // Use individual API for single collection creation (not import)
     const lastCreatedCollectionIndex =
       graphqlCollectionStore.value.state.length - 1
 
@@ -209,6 +289,11 @@ export const storeSyncDefinition: StoreSyncDefinitionOf<
     const data = {
       auth: collection.auth,
       headers: collection.headers,
+      variables: stripSecretVariableValuesForWire(collection.variables ?? []),
+      _ref_id: collection._ref_id,
+      description: collection.description ?? null,
+      preRequestScript: collection.preRequestScript ?? "",
+      testScript: collection.testScript ?? "",
     }
 
     if (collectionID) {
@@ -253,6 +338,11 @@ export const storeSyncDefinition: StoreSyncDefinitionOf<
     const data = {
       auth: folder.auth,
       headers: folder.headers,
+      variables: stripSecretVariableValuesForWire(folder.variables ?? []),
+      _ref_id: folder._ref_id,
+      description: folder.description ?? null,
+      preRequestScript: folder.preRequestScript ?? "",
+      testScript: folder.testScript ?? "",
     }
 
     if (folderBackendId) {

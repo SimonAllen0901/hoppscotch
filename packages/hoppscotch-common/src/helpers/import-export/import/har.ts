@@ -37,6 +37,10 @@ export const harImporter = (
         authActive: true,
       },
       headers: [],
+      description: null,
+      variables: [],
+      preRequestScript: "",
+      testScript: "",
     })
 
     return E.right([collection])

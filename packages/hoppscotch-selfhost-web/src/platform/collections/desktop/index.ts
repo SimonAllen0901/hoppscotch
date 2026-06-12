@@ -1,9 +1,10 @@
 import { CollectionsPlatformDef } from "@hoppscotch/common/platform/collections"
-import { authEvents$, def as platformAuth } from "@platform/auth/desktop"
-import { runDispatchWithOutSyncing } from "@lib/sync"
+import { authEvents$, def as platformAuth } from "@app/platform/auth/desktop"
+import { runDispatchWithOutSyncing } from "@app/lib/sync"
 
 import {
   exportUserCollectionsToJSON,
+  runUserChildCollectionSortedSubscription,
   runUserCollectionCreatedSubscription,
   runUserCollectionDuplicatedSubscription,
   runUserCollectionMovedSubscription,
@@ -14,9 +15,15 @@ import {
   runUserRequestDeletedSubscription,
   runUserRequestMovedSubscription,
   runUserRequestUpdatedSubscription,
+  runUserRootCollectionsSortedSubscription,
 } from "./api"
 import { collectionsSyncer, getStoreByCollectionType } from "./sync"
 
+import {
+  ReqType,
+  UserCollectionDuplicatedData,
+  UserRequest,
+} from "@app/api/generated/graphql"
 import { runGQLSubscription } from "@hoppscotch/common/helpers/backend/GQLClient"
 import {
   addGraphqlCollection,
@@ -44,6 +51,8 @@ import {
   saveRESTRequestAs,
   setGraphqlCollections,
   setRESTCollections,
+  sortRESTCollection,
+  sortRESTFolder,
   updateRESTCollectionOrder,
   updateRESTRequestOrder,
 } from "@hoppscotch/common/newstore/collections"
@@ -57,11 +66,6 @@ import {
   HoppRESTRequest,
 } from "@hoppscotch/data"
 import * as E from "fp-ts/Either"
-import {
-  ReqType,
-  UserCollectionDuplicatedData,
-  UserRequest,
-} from "@api/generated/graphql"
 import { gqlCollectionsSyncer } from "./gqlCollections.sync"
 
 function initCollectionsSync() {
@@ -94,7 +98,7 @@ function initCollectionsSync() {
   })
 }
 
-type ExportedUserCollectionREST = {
+export type ExportedUserCollectionREST = {
   id?: string
   _ref_id?: string
   folders: ExportedUserCollectionREST[]
@@ -103,7 +107,7 @@ type ExportedUserCollectionREST = {
   data: string
 }
 
-type ExportedUserCollectionGQL = {
+export type ExportedUserCollectionGQL = {
   id?: string
   _ref_id?: string
   folders: ExportedUserCollectionGQL[]
@@ -121,7 +125,7 @@ function addDescriptionField(
   }))
 }
 
-function exportedCollectionToHoppCollection(
+export function exportedCollectionToHoppCollection(
   collection: ExportedUserCollectionREST | ExportedUserCollectionGQL,
   collectionType: "REST" | "GQL"
 ): HoppCollection {
@@ -135,12 +139,16 @@ function exportedCollectionToHoppCollection(
             auth: { authType: "inherit", authActive: false },
             headers: [],
             _ref_id: generateUniqueRefId("coll"),
+            variables: [],
+            description: null,
+            preRequestScript: "",
+            testScript: "",
           }
 
     return {
       id: restCollection.id,
       _ref_id: data._ref_id ?? generateUniqueRefId("coll"),
-      v: 6,
+      v: 12,
       name: restCollection.name,
       folders: restCollection.folders.map((folder) =>
         exportedCollectionToHoppCollection(folder, collectionType)
@@ -165,6 +173,8 @@ function exportedCollectionToHoppCollection(
           testScript,
           requestVariables,
           responses,
+          description,
+          _ref_id,
         } = request
 
         const resolvedParams = addDescriptionField(params)
@@ -184,10 +194,16 @@ function exportedCollectionToHoppCollection(
           preRequestScript,
           testScript,
           responses,
+          description: description ?? null,
+          _ref_id: _ref_id ?? generateUniqueRefId("req"),
         }
       }),
       auth: data.auth,
       headers: addDescriptionField(data.headers),
+      variables: data.variables ?? [],
+      description: data.description ?? null,
+      preRequestScript: data.preRequestScript ?? "",
+      testScript: data.testScript ?? "",
     }
   } else {
     const gqlCollection = collection as ExportedUserCollectionGQL
@@ -199,12 +215,16 @@ function exportedCollectionToHoppCollection(
             auth: { authType: "inherit", authActive: true },
             headers: [],
             _ref_id: generateUniqueRefId("coll"),
+            variables: [],
+            description: null,
+            preRequestScript: "",
+            testScript: "",
           }
 
     return {
       id: gqlCollection.id,
       _ref_id: data._ref_id ?? generateUniqueRefId("coll"),
-      v: 6,
+      v: 12,
       name: gqlCollection.name,
       folders: gqlCollection.folders.map((folder) =>
         exportedCollectionToHoppCollection(folder, collectionType)
@@ -232,6 +252,10 @@ function exportedCollectionToHoppCollection(
       }),
       auth: data.auth,
       headers: addDescriptionField(data.headers),
+      variables: data.variables ?? [],
+      description: data.description ?? null,
+      preRequestScript: data.preRequestScript ?? "",
+      testScript: data.testScript ?? "",
     }
   }
 }
@@ -284,6 +308,10 @@ function setupSubscriptions() {
     setupUserCollectionOrderUpdatedSubscription()
   const userCollectionDuplicatedSub =
     setupUserCollectionDuplicatedSubscription()
+  const userRootCollectionsSortedSub =
+    setupUserRootCollectionsSortedSubscription()
+  const userChildCollectionSortedSub =
+    setupUserChildCollectionSortedSubscription()
 
   const userRequestCreatedSub = setupUserRequestCreatedSubscription()
   const userRequestUpdatedSub = setupUserRequestUpdatedSubscription()
@@ -297,6 +325,8 @@ function setupSubscriptions() {
     userCollectionMovedSub,
     userCollectionOrderUpdatedSub,
     userCollectionDuplicatedSub,
+    userRootCollectionsSortedSub,
+    userChildCollectionSortedSub,
     userRequestCreatedSub,
     userRequestUpdatedSub,
     userRequestDeletedSub,
@@ -375,6 +405,10 @@ function setupUserCollectionCreatedSubscription() {
                 auth: { authType: "inherit", authActive: true },
                 headers: [],
                 _ref_id: generateUniqueRefId("coll"),
+                variables: [],
+                description: null,
+                preRequestScript: "",
+                testScript: "",
               }
 
         runDispatchWithOutSyncing(() => {
@@ -383,19 +417,27 @@ function setupUserCollectionCreatedSubscription() {
                 name: res.right.userCollectionCreated.title,
                 folders: [],
                 requests: [],
-                v: 6,
+                v: 12,
                 _ref_id: data._ref_id,
                 auth: data.auth,
                 headers: addDescriptionField(data.headers),
+                variables: data.variables ?? [],
+                description: data.description ?? null,
+                preRequestScript: data.preRequestScript ?? "",
+                testScript: data.testScript ?? "",
               })
             : addRESTCollection({
                 name: res.right.userCollectionCreated.title,
                 folders: [],
                 requests: [],
-                v: 6,
+                v: 12,
                 _ref_id: data._ref_id,
                 auth: data.auth,
                 headers: addDescriptionField(data.headers),
+                variables: data.variables ?? [],
+                description: data.description ?? null,
+                preRequestScript: data.preRequestScript ?? "",
+                testScript: data.testScript ?? "",
               })
 
           const localIndex = collectionStore.value.state.length - 1
@@ -598,12 +640,23 @@ function setupUserCollectionDuplicatedSubscription() {
         )
 
       // Incoming data transformed to the respective internal representations
-      const { auth, headers } =
+      const {
+        auth,
+        headers,
+        variables,
+        description,
+        preRequestScript,
+        testScript,
+      } =
         data && data != "null"
           ? JSON.parse(data)
           : {
               auth: { authType: "inherit", authActive: true },
               headers: [],
+              variables: [],
+              description: null,
+              preRequestScript: "",
+              testScript: "",
             }
       // Duplicated collection will have a unique ref id
       const _ref_id = generateUniqueRefId("coll")
@@ -620,10 +673,14 @@ function setupUserCollectionDuplicatedSubscription() {
         name,
         folders,
         requests,
-        v: 6,
+        v: 12,
         _ref_id,
         auth,
         headers: addDescriptionField(headers),
+        variables: variables ?? [],
+        description: description ?? null,
+        preRequestScript: preRequestScript ?? "",
+        testScript: testScript ?? "",
       }
 
       // only folders will have parent collection id
@@ -714,6 +771,56 @@ function setupUserCollectionDuplicatedSubscription() {
   })
 
   return userCollectionDuplicatedSub
+}
+
+const setupUserRootCollectionsSortedSubscription = () => {
+  const [userRootCollectionsSorted$, userRootCollectionsSortedSub] =
+    runUserRootCollectionsSortedSubscription()
+
+  userRootCollectionsSorted$.subscribe((res) => {
+    if (E.isRight(res)) {
+      runDispatchWithOutSyncing(() => {
+        if (res.right.userRootCollectionsSorted) {
+          const { sortOption } = res.right.userRootCollectionsSorted
+
+          const sortOrder = sortOption === "TITLE_ASC" ? "asc" : "desc"
+
+          sortRESTCollection(null, sortOrder)
+        }
+      })
+    }
+  })
+  return userRootCollectionsSortedSub
+}
+
+const setupUserChildCollectionSortedSubscription = () => {
+  const [userChildCollectionSorted$, userChildCollectionSortedSub] =
+    runUserChildCollectionSortedSubscription()
+
+  userChildCollectionSorted$.subscribe((res) => {
+    if (E.isRight(res)) {
+      runDispatchWithOutSyncing(() => {
+        if (res.right.userChildCollectionsSorted) {
+          const { parentCollectionID, sortOption } =
+            res.right.userChildCollectionsSorted
+
+          if (!parentCollectionID) return
+
+          const sortOrder = sortOption === "TITLE_ASC" ? "asc" : "desc"
+
+          const sourcePath = getCollectionPathFromCollectionID(
+            parentCollectionID,
+            restCollectionStore.value.state
+          )
+
+          if (!sourcePath) return
+
+          sortRESTFolder(sourcePath, sortOrder)
+        }
+      })
+    }
+  })
+  return userChildCollectionSortedSub
 }
 
 function setupUserRequestCreatedSubscription() {
@@ -947,8 +1054,12 @@ function setupUserRequestDeletedSubscription() {
   return userRequestDeletedSub
 }
 
+import { importToPersonalWorkspace } from "./import"
+
 export const def: CollectionsPlatformDef = {
   initCollectionsSync,
+  loadUserCollections,
+  importToPersonalWorkspace,
 }
 
 function getCollectionPathFromCollectionID(
@@ -1037,10 +1148,24 @@ function transformDuplicatedCollections(
       requests: userRequests,
       title: name,
     }) => {
-      const { auth, headers } =
+      const {
+        auth,
+        headers,
+        variables,
+        description,
+        preRequestScript,
+        testScript,
+      } =
         data && data !== "null"
           ? JSON.parse(data)
-          : { auth: { authType: "inherit", authActive: true }, headers: [] }
+          : {
+              auth: { authType: "inherit", authActive: true },
+              headers: [],
+              variables: [],
+              description: null,
+              preRequestScript: "",
+              testScript: "",
+            }
 
       const _ref_id = generateUniqueRefId("coll")
 
@@ -1054,9 +1179,13 @@ function transformDuplicatedCollections(
         folders,
         requests,
         _ref_id,
-        v: 6,
+        v: 12,
         auth,
         headers: addDescriptionField(headers),
+        variables: variables ?? [],
+        description: description ?? null,
+        preRequestScript: preRequestScript ?? "",
+        testScript: testScript ?? "",
       }
     }
   )

@@ -3,9 +3,26 @@
     <div
       class="sticky top-upperMobileSecondaryStickyFold z-10 flex flex-shrink-0 items-center justify-between overflow-x-auto border-b border-dividerLight bg-primary pl-4 sm:top-upperSecondaryStickyFold"
     >
-      <label class="truncate font-semibold text-secondaryLight">
-        {{ t("preRequest.javascript_code") }}
-      </label>
+      <div class="flex items-center gap-2">
+        <label class="truncate font-semibold text-secondaryLight">
+          {{ t("preRequest.javascript_code") }}
+        </label>
+        <HoppButtonSecondary
+          v-if="inheritedScripts.length > 0"
+          v-tippy="{ theme: 'tooltip' }"
+          :title="t('script.view_inherited')"
+          :label="
+            t('script.inheriting_from_count', {
+              count: inheritedScripts.length,
+            })
+          "
+          :icon="IconFileSymlink"
+          class="!px-1 !py-0.5 text-yellow-500 hover:text-yellow-500"
+          filled
+          outline
+          @click="showInheritedModal = true"
+        />
+      </div>
       <div class="flex">
         <HoppButtonSecondary
           v-tippy="{ theme: 'tooltip' }"
@@ -38,7 +55,18 @@
     </div>
     <div class="flex flex-1 border-b border-dividerLight">
       <div class="w-2/3 border-r border-dividerLight h-full relative">
-        <div ref="preRequestEditor" class="h-full absolute inset-0"></div>
+        <MonacoScriptEditor
+          v-if="EXPERIMENTAL_SCRIPTING_SANDBOX && props.isActive"
+          v-model="preRequestScript"
+          :is-active="props.isActive"
+          type="pre-request"
+        />
+
+        <div
+          v-else
+          ref="preRequestEditor"
+          class="h-full absolute inset-0"
+        ></div>
       </div>
       <div
         class="z-[9] sticky top-upperTertiaryStickyFold h-full min-w-[12rem] max-w-1/3 flex-shrink-0 overflow-auto overflow-x-auto bg-primary p-4"
@@ -65,6 +93,12 @@
         </div>
       </div>
     </div>
+    <HttpInheritedScriptsModal
+      :show="showInheritedModal"
+      :scripts="inheritedScripts"
+      script-type="preRequestScript"
+      @close="showInheritedModal = false"
+    />
     <AiexperimentsModifyPreRequestModal
       v-if="isModifyPreRequestModalOpen && currentRequest"
       :current-script="preRequestScript"
@@ -76,37 +110,53 @@
 </template>
 
 <script setup lang="ts">
-import IconHelpCircle from "~icons/lucide/help-circle"
-import IconWrapText from "~icons/lucide/wrap-text"
-import IconTrash2 from "~icons/lucide/trash-2"
-import IconSparkles from "~icons/lucide/sparkles"
-import { reactive, ref, computed } from "vue"
-import snippets from "@helpers/preRequestScriptSnippets"
-import { useCodemirror } from "@composables/codemirror"
-import linter from "~/helpers/editor/linting/preRequest"
-import completer from "~/helpers/editor/completion/preRequest"
-import { useI18n } from "@composables/i18n"
-import { useVModel } from "@vueuse/core"
-import { useNestedSetting } from "~/composables/settings"
-import { toggleNestedSetting } from "~/newstore/settings"
-import { useAIExperiments } from "~/composables/ai-experiments"
-import { useService } from "dioc/vue"
-import { RESTTabService } from "~/services/tab/rest"
-import { platform } from "~/platform"
-import { useReadonlyStream } from "~/composables/stream"
 import AiexperimentsModifyPreRequestModal from "@components/aiexperiments/ModifyPreRequestModal.vue"
+import { useCodemirror } from "@composables/codemirror"
+import { useI18n } from "@composables/i18n"
+import snippets from "@helpers/preRequestScriptSnippets"
+import { useVModel } from "@vueuse/core"
+import { useService } from "dioc/vue"
+import { computed, reactive, ref } from "vue"
+
+import { useAIExperiments } from "~/composables/ai-experiments"
+import { useNestedSetting, useSetting } from "~/composables/settings"
+import { useReadonlyStream } from "~/composables/stream"
 import { invokeAction } from "~/helpers/actions"
+import completer from "~/helpers/editor/completion/preRequest"
+import linter from "~/helpers/editor/linting/preRequest"
+import { hasActualScript } from "@hoppscotch/js-sandbox/scripting"
+import { HoppInheritedProperty } from "~/helpers/types/HoppInheritedProperties"
+import { toggleNestedSetting } from "~/newstore/settings"
+import { platform } from "~/platform"
+import { RESTTabService } from "~/services/tab/rest"
+import IconFileSymlink from "~icons/lucide/file-symlink"
+import IconHelpCircle from "~icons/lucide/help-circle"
+import IconSparkles from "~icons/lucide/sparkles"
+import IconTrash2 from "~icons/lucide/trash-2"
+import IconWrapText from "~icons/lucide/wrap-text"
 
 const t = useI18n()
 
 const props = defineProps<{
   modelValue: string
+  isActive?: boolean
+  inheritedProperties?: HoppInheritedProperty
 }>()
 const emit = defineEmits<{
   (e: "update:modelValue", value: string): void
 }>()
 
 const preRequestScript = useVModel(props, "modelValue", emit)
+
+const showInheritedModal = ref(false)
+
+const inheritedScripts = computed(() => {
+  return (
+    props.inheritedProperties?.scripts?.filter((script) =>
+      hasActualScript(script.preRequestScript)
+    ) ?? []
+  )
+})
 
 const preRequestEditor = ref<any | null>(null)
 const WRAP_LINES = useNestedSetting("WRAP_LINES", "httpPreRequest")
@@ -125,6 +175,10 @@ useCodemirror(
     environmentHighlights: false,
     contextMenuEnabled: false,
   })
+)
+
+const EXPERIMENTAL_SCRIPTING_SANDBOX = useSetting(
+  "EXPERIMENTAL_SCRIPTING_SANDBOX"
 )
 
 const useSnippet = (script: string) => {

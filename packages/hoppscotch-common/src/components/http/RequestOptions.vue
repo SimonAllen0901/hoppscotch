@@ -54,31 +54,33 @@
       :id="'preRequestScript'"
       :label="`${t('tab.pre_request_script')}`"
       :indicator="
-        'preRequestScript' in request &&
-        request.preRequestScript &&
-        request.preRequestScript.length > 0
-          ? true
-          : false
+        ('preRequestScript' in request &&
+          hasActualScript(request.preRequestScript)) ||
+        hasInheritedPreRequestScripts
       "
     >
       <HttpPreRequestScript
         v-if="'preRequestScript' in request"
         v-model="request.preRequestScript"
+        :is-active="selectedOptionTab === 'preRequestScript'"
+        :inherited-properties="inheritedProperties"
       />
     </HoppSmartTab>
     <HoppSmartTab
       v-if="showTestsTab"
       :id="'tests'"
-      :label="`${t('tab.tests')}`"
+      :label="`${t('tab.post_request_script')}`"
       :indicator="
-        'testScript' in request &&
-        request.testScript &&
-        request.testScript.length > 0
-          ? true
-          : false
+        ('testScript' in request && hasActualScript(request.testScript)) ||
+        hasInheritedTestScripts
       "
     >
-      <HttpTests v-if="'testScript' in request" v-model="request.testScript" />
+      <HttpTests
+        v-if="'testScript' in request"
+        v-model="request.testScript"
+        :is-active="selectedOptionTab === 'tests'"
+        :inherited-properties="inheritedProperties"
+      />
     </HoppSmartTab>
     <HoppSmartTab
       v-if="properties?.includes('requestVariables') ?? true"
@@ -100,11 +102,13 @@ import {
 } from "@hoppscotch/data"
 import { useVModel } from "@vueuse/core"
 import { computed } from "vue"
+
 import { defineActionHandler } from "~/helpers/actions"
+import { hasActualScript } from "@hoppscotch/js-sandbox/scripting"
 import { HoppInheritedProperty } from "~/helpers/types/HoppInheritedProperties"
 import { AggregateEnvironment } from "~/newstore/environments"
 
-const VALID_OPTION_TABS = [
+const _VALID_OPTION_TABS = [
   "params",
   "bodyParams",
   "headers",
@@ -114,7 +118,7 @@ const VALID_OPTION_TABS = [
   "requestVariables",
 ] as const
 
-export type RESTOptionTabs = (typeof VALID_OPTION_TABS)[number]
+export type RESTOptionTabs = (typeof _VALID_OPTION_TABS)[number]
 
 const t = useI18n()
 
@@ -180,6 +184,22 @@ const newActiveRequestVariablesCount = computed(() => {
 
 const isBodyFilled = computed(() => {
   return Boolean(request.value.body.body && request.value.body.body.length > 0)
+})
+
+const hasInheritedPreRequestScripts = computed(() => {
+  return (
+    props.inheritedProperties?.scripts?.some((script) =>
+      hasActualScript(script.preRequestScript)
+    ) ?? false
+  )
+})
+
+const hasInheritedTestScripts = computed(() => {
+  return (
+    props.inheritedProperties?.scripts?.some((script) =>
+      hasActualScript(script.testScript)
+    ) ?? false
+  )
 })
 
 defineActionHandler("request.open-tab", ({ tab }) => {

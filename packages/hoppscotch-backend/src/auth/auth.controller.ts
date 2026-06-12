@@ -20,9 +20,10 @@ import { GqlUser } from 'src/decorators/gql-user.decorator';
 import { AuthUser } from 'src/types/AuthUser';
 import { RTCookie } from 'src/decorators/rt-cookie.decorator';
 import { AuthProvider, authCookieHandler, authProviderCheck } from './helper';
+import { isValidLocalhostRedirectUri } from './redirect-uri.validator';
 import { GoogleSSOGuard } from './guards/google-sso.guard';
 import { GithubSSOGuard } from './guards/github-sso.guard';
-import { MicrosoftSSOGuard } from './guards/microsoft-sso-.guard';
+import { MicrosoftSSOGuard } from './guards/microsoft-sso.guard';
 import { ThrottlerBehindProxyGuard } from 'src/guards/throttler-behind-proxy.guard';
 import { SkipThrottle } from '@nestjs/throttler';
 import { AUTH_PROVIDER_NOT_SPECIFIED } from 'src/errors';
@@ -76,7 +77,7 @@ export class AuthController {
   async verify(@Body() data: VerifyMagicDto, @Res() res: Response) {
     const authTokens = await this.authService.verifyMagicLinkTokens(data);
     if (E.isLeft(authTokens)) throwHTTPErr(authTokens.left);
-    authCookieHandler(res, authTokens.right, false, null);
+    authCookieHandler(res, authTokens.right, false, null, this.configService);
   }
 
   /**
@@ -95,7 +96,7 @@ export class AuthController {
       user,
     );
     if (E.isLeft(newTokenPair)) throwHTTPErr(newTokenPair.left);
-    authCookieHandler(res, newTokenPair.right, false, null);
+    authCookieHandler(res, newTokenPair.right, false, null, this.configService);
   }
 
   /**
@@ -121,6 +122,7 @@ export class AuthController {
       authTokens.right,
       true,
       req.authInfo.state.redirect_uri,
+      this.configService,
     );
   }
 
@@ -147,6 +149,7 @@ export class AuthController {
       authTokens.right,
       true,
       req.authInfo.state.redirect_uri,
+      this.configService,
     );
   }
 
@@ -173,6 +176,7 @@ export class AuthController {
       authTokens.right,
       true,
       req.authInfo.state.redirect_uri,
+      this.configService,
     );
   }
 
@@ -201,10 +205,10 @@ export class AuthController {
     @GqlUser() user: AuthUser,
     @Query('redirect_uri') redirectUri: string,
   ) {
-    if (!redirectUri || !redirectUri.startsWith('http://localhost')) {
+    if (!isValidLocalhostRedirectUri(redirectUri)) {
       throwHTTPErr({
         message: 'Invalid desktop callback URL',
-        statusCode: 400
+        statusCode: 400,
       });
     }
 
@@ -212,5 +216,15 @@ export class AuthController {
     if (E.isLeft(tokens)) throwHTTPErr(tokens.left);
 
     return tokens.right;
+  }
+
+  @Get('verify-token')
+  @UseGuards(JwtAuthGuard)
+  async verifyToken(@GqlUser() user: AuthUser) {
+    return {
+      isValid: true,
+      uid: user.uid,
+      message: 'Token is valid',
+    };
   }
 }

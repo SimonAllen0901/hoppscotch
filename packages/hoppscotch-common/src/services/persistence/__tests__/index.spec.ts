@@ -10,8 +10,10 @@ import { watchDebounced } from "@vueuse/core"
 import { TestContainer } from "dioc/testing"
 import { cloneDeep } from "lodash-es"
 import superjson from "superjson"
-import { afterAll, beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+import { getKernelMode, initKernel } from "@hoppscotch/kernel"
+import { Store } from "~/kernel"
 import { MQTTRequest$, setMQTTRequest } from "~/newstore/MQTTSession"
 import { SSERequest$, setSSERequest } from "~/newstore/SSESession"
 import { SIORequest$, setSIORequest } from "~/newstore/SocketIOSession"
@@ -46,6 +48,7 @@ import {
   performSettingsDataMigrations,
   settingsStore,
 } from "~/newstore/settings"
+import { SecretEnvironmentService } from "~/services/secret-environment.service"
 import { GQLTabService } from "~/services/tab/graphql"
 import { RESTTabService } from "~/services/tab/rest"
 import {
@@ -70,9 +73,6 @@ import {
   VUEX_DATA_MOCK,
   WEBSOCKET_REQUEST_MOCK,
 } from "./__mocks__"
-import { SecretEnvironmentService } from "~/services/secret-environment.service"
-import { getKernelMode, initKernel } from "@hoppscotch/kernel"
-import { Store } from "~/kernel"
 
 initKernel(getKernelMode())
 
@@ -208,7 +208,7 @@ describe("PersistenceService", () => {
     await Store.remove(STORE_NAMESPACE, STORE_KEYS.SCHEMA_VERSION)
   })
 
-  afterAll(() => {
+  afterEach(() => {
     // Clear all mocks
     vi.clearAllMocks()
 
@@ -292,14 +292,14 @@ describe("PersistenceService", () => {
 
       it(`shows an error and sets the entry as a backup in localStorage if "${vuexKey}" read from localStorage doesn't match the schema`, async () => {
         // Invalid shape for `vuex`
-        // `postwoman.settings.CURRENT_INTERCEPTOR_ID` -> `string`
+        // `postwoman.settings.CURRENT_KERNEL_INTERCEPTOR_ID` -> should be `string`, not `number`
         const vuexData = {
           ...VUEX_DATA_MOCK,
           postwoman: {
             ...VUEX_DATA_MOCK.postwoman,
             settings: {
               ...VUEX_DATA_MOCK.postwoman.settings,
-              CURRENT_INTERCEPTOR_ID: 1234,
+              CURRENT_KERNEL_INTERCEPTOR_ID: 1234,
             },
           },
         }
@@ -709,6 +709,74 @@ describe("PersistenceService", () => {
         )
       })
 
+      it(`v=2 migration repairs entries in "${graphqlHistoryKey}" whose response field is a non-string and writes a pre-v2 backup`, async () => {
+        // Pre-fix sync writes round-tripped via JSON.stringify/parse,
+        // leaving entries with object-shaped response in localStorage.
+        const corruptedEntries = [
+          { ...GQL_HISTORY_MOCK[0], response: {} },
+          { ...GQL_HISTORY_MOCK[0], response: null },
+        ]
+        await setStoreItem(graphqlHistoryKey, corruptedEntries)
+
+        const setItemSpy = spyOnSetItem()
+
+        await invokeSetupLocalPersistence()
+
+        // Original is preserved at the pre-v2 backup key for recovery.
+        expect(setItemSpy).toHaveBeenCalledWith(
+          `${graphqlHistoryKey}-pre-v2-backup`,
+          expect.stringContaining(JSON.stringify(corruptedEntries))
+        )
+
+        // Repaired data is written back to the live key with response coerced.
+        // - Object response {} stringifies to "{}", which appears in the
+        //   serialized payload as `"response":"{}"`.
+        // - Null response stringifies to "null", which appears in the
+        //   serialized payload as `"response":"null"` and preserves the
+        //   original semantic of an empty payload.
+        expect(setItemSpy).toHaveBeenCalledWith(
+          graphqlHistoryKey,
+          expect.stringContaining('"response":"{}"')
+        )
+        expect(setItemSpy).toHaveBeenCalledWith(
+          graphqlHistoryKey,
+          expect.stringContaining('"response":"null"')
+        )
+
+        // Schema version bumps to 2, so the migration won't run again.
+        expect(setItemSpy).toHaveBeenCalledWith(
+          schemaVersionKey,
+          expect.stringMatching(/"data":"2"/)
+        )
+
+        // No Zod-failure backup since the migration repaired the shape
+        // before validation could reject it.
+        expect(toastErrorFn).not.toHaveBeenCalledWith(
+          expect.stringContaining(graphqlHistoryKey)
+        )
+      })
+
+      it(`v=2 migration is a no-op when "${graphqlHistoryKey}" entries already have string responses`, async () => {
+        // Clean entries — response is already a string per the contract.
+        await setStoreItem(graphqlHistoryKey, GQL_HISTORY_MOCK)
+
+        const setItemSpy = spyOnSetItem()
+
+        await invokeSetupLocalPersistence()
+
+        // No backup write since needsRepair was false.
+        expect(setItemSpy).not.toHaveBeenCalledWith(
+          `${graphqlHistoryKey}-pre-v2-backup`,
+          expect.anything()
+        )
+
+        // Schema version still bumps to 2 so the migration is recorded as run.
+        expect(setItemSpy).toHaveBeenCalledWith(
+          schemaVersionKey,
+          expect.stringMatching(/"data":"2"/)
+        )
+      })
+
       it(`GQL history schema parsing succeeds if there is no "${graphqlHistoryKey}" key present in localStorage where the fallback of "[]" is chosen`, async () => {
         window.localStorage.removeItem(graphqlHistoryKey)
 
@@ -954,10 +1022,10 @@ describe("PersistenceService", () => {
         // Invalid shape for `environments`
         const environments = [
           // `entries` -> `variables`
+          // no name for the environment
           {
             v: 1,
             id: "ENV_1",
-            name: "Test",
             entries: [{ key: "test-key", value: "test-value", secret: false }],
           },
         ]
